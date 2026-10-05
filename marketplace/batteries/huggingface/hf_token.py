@@ -60,7 +60,7 @@ def _expand_tilde(path, environ):
     path = str(path)
     if not path.startswith("~"):
         return path
-    if len(path) > 1 and path[1] not in (("/", "\\") if os.name == "nt" else ("/")):
+    if len(path) > 1 and path[1] not in (("/", "\\") if os.name == "nt" else ("/",)):
         return path
 
     home = None
