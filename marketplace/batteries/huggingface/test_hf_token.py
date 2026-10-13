@@ -163,5 +163,105 @@ class ExpandTildeTests(unittest.TestCase):
                     self.check_expand(os_name, env, path, expected)
 
 
+class HomeDirTests(unittest.TestCase):
+    """home_dir returns the correct directory for both platforms."""
+
+    def test_posix_uses_home(self):
+        self.assertEqual(HF_TOKEN.home_dir({"HOME": "/home/user"}, windows=False), "/home/user")
+
+    def test_posix_returns_none_when_home_unset(self):
+        self.assertIsNone(HF_TOKEN.home_dir({}, windows=False))
+
+    def test_posix_returns_none_when_home_empty(self):
+        self.assertIsNone(HF_TOKEN.home_dir({"HOME": ""}, windows=False))
+
+    def test_windows_prefers_userprofile(self):
+        env = {"USERPROFILE": r"C:\Users\user", "HOMEDRIVE": "C:", "HOMEPATH": r"\Users\other"}
+        self.assertEqual(HF_TOKEN.home_dir(env, windows=True), r"C:\Users\user")
+
+    def test_windows_falls_back_to_homedrive_homepath(self):
+        env = {"HOMEDRIVE": "C:", "HOMEPATH": r"\Users\user"}
+        self.assertEqual(HF_TOKEN.home_dir(env, windows=True), r"C:\Users\user")
+
+    def test_windows_falls_back_to_home(self):
+        env = {"HOME": r"C:\Users\user"}
+        self.assertEqual(HF_TOKEN.home_dir(env, windows=True), r"C:\Users\user")
+
+    def test_windows_returns_none_when_nothing_set(self):
+        self.assertIsNone(HF_TOKEN.home_dir({}, windows=True))
+
+
+class ExpandTildeTests(unittest.TestCase):
+    """_expand_tilde works correctly on both platforms without mocking os.name."""
+
+    def test_posix_expands_tilde(self):
+        result = HF_TOKEN._expand_tilde("~/.cache/hf/token", {"HOME": "/home/user"}, windows=False)
+        self.assertEqual(result, "/home/user/.cache/hf/token")
+
+    def test_posix_leaves_tilde_when_no_home(self):
+        result = HF_TOKEN._expand_tilde("~/file", {}, windows=False)
+        self.assertEqual(result, "~/file")
+
+    def test_windows_expands_tilde_via_userprofile(self):
+        env = {"USERPROFILE": r"C:\Users\user"}
+        result = HF_TOKEN._expand_tilde(r"~\.cache\hf\token", env, windows=True)
+        self.assertEqual(result, r"C:\Users\user\.cache\hf\token")
+
+    def test_windows_expands_tilde_via_homedrive_homepath(self):
+        env = {"HOMEDRIVE": "C:", "HOMEPATH": r"\Users\user"}
+        result = HF_TOKEN._expand_tilde("~/file", env, windows=True)
+        self.assertEqual(result, r"C:\Users\user/file")
+
+    def test_windows_leaves_tilde_when_nothing_set(self):
+        result = HF_TOKEN._expand_tilde("~/file", {}, windows=True)
+        self.assertEqual(result, "~/file")
+
+    def test_non_tilde_path_is_unchanged(self):
+        result = HF_TOKEN._expand_tilde("/absolute/path", {"HOME": "/home/user"}, windows=False)
+        self.assertEqual(result, "/absolute/path")
+
+
+class TokenPathWindowsTests(unittest.TestCase):
+    """token_path resolves Windows home variables correctly without mocking."""
+
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+
+    def test_resolves_via_userprofile_on_windows(self):
+        env = {"USERPROFILE": self.home.name}
+        expected = Path(self.home.name) / ".cache" / "huggingface" / "token"
+        self.assertEqual(HF_TOKEN.token_path(env, windows=True), expected)
+
+    def test_resolves_via_homedrive_homepath_on_windows(self):
+        # Split the temp path string manually to avoid pathlib's relative_to("C:") quirk.
+        home_str = self.home.name
+        # Find the drive separator: "C:\..." -> drive="C:", rest="\..."
+        colon_idx = home_str.find(":")
+        if colon_idx != -1:
+            drive = home_str[: colon_idx + 1]
+            rest = home_str[colon_idx + 1 :]
+        else:
+            drive = ""
+            rest = home_str
+        env = {"HOMEDRIVE": drive, "HOMEPATH": rest}
+        expected = Path(home_str) / ".cache" / "huggingface" / "token"
+        self.assertEqual(HF_TOKEN.token_path(env, windows=True), expected)
+
+    def test_resolves_via_home_on_posix(self):
+        env = {"HOME": self.home.name}
+        expected = Path(self.home.name) / ".cache" / "huggingface" / "token"
+        self.assertEqual(HF_TOKEN.token_path(env, windows=False), expected)
+
+    def test_hf_token_path_takes_precedence_regardless_of_platform(self):
+        explicit = str(Path(self.home.name) / "my_token")
+        for windows in (True, False):
+            with self.subTest(windows=windows):
+                self.assertEqual(
+                    HF_TOKEN.token_path({"HF_TOKEN_PATH": explicit}, windows=windows),
+                    Path(explicit),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
