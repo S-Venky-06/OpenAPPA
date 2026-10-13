@@ -80,21 +80,6 @@ def home_dir(environ, windows: bool) -> "str | None":
         return home if home else None
 
 
-def _expand_tilde(path: str, environ: dict, windows: bool = os.name == "nt") -> str:
-    """Replace a leading ``~`` with the user home directory.
-
-    *windows* controls which environment variables are consulted (see
-    :func:`home_dir`).  It defaults to ``os.name == "nt"`` at import time so
-    that tests can pass an explicit value without touching ``os.name``.
-    """
-    if not path.startswith("~"):
-        return path
-    home = home_dir(environ, windows)
-    if home is None:
-        return path  # cannot expand; leave the tilde in place
-    return home + path[1:]
-
-
 def token_path(environ, windows: bool = os.name == "nt"):
     if path := environ.get("HF_TOKEN_PATH"):
         return Path(path)
