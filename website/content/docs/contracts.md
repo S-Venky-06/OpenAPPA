@@ -125,7 +125,7 @@ server = "demo-tools"
 delta = { trust = "suspicious" }
 ```
 
-This rule identifies `mcp/demo-tools/read_secret`. Deployment-level `[server_aliases]` maps a policy's server name to a list of configured connection identities, such as `databricks = ["genie", "sql"]`; every rule under that name then covers each listed connection. APPA does not infer a provider from a hostname or server metadata. A server qualifier cannot repair duplicate host dispatch names; the host must distinguish those tools.
+This rule identifies `mcp/demo-tools/read_secret`. Deployment-level `[aliases]` maps a policy's namespace to a list of identities the deployment reports. `aliases.mcp` maps a server name to configured connection identities, such as `databricks = ["genie", "sql"]`; every rule under that name then covers each listed connection. `aliases.host` maps a battery's host namespace to the host that serves the same tools, such as `claude-code = ["archestra"]`; every `host/claude-code/...` rule then names `host/archestra/...`. Aliases resolve after composition, so a root rule still matches before a battery rule for the same tool. APPA does not infer a provider from a hostname or server metadata. A server qualifier cannot repair duplicate host dispatch names; the host must distinguish those tools.
 
 kagent derives a default source ID from the exact configured endpoint URL. Native rules do not require that ID. Discovery supplies evidence, not permission: known tools need policy coverage, unavailable sources remain unknown, and later calls still pass runtime enforcement. A trajectory retains its opening policy and accepted identities.
 
@@ -350,7 +350,7 @@ Under `[policy.audience]`, `self` and `internal` list the selectors that supply 
 
 A host that serves many people can name the person each session acts for. It passes that person's email address as the session's principal when the session starts. In that session, `self` is exactly that address. OpenAPPA does not ask the `self` selectors, and `internal` includes the principal beside its own sources. Children and root forks of the session act for the same principal. A session without a principal uses `[policy.audience] self` as usual.
 
-A host names the principal in process, through the embedded runtime API; the HTTP hook wire does not carry one. OpenAPPA takes the principal on the host's word; it does not authenticate it. Only a host that authenticated the person should name one, and the principal must be the address the membership services report for that person. A multi-user host usually leaves `[policy.audience] self` empty, so a session that names no principal cannot establish `self` and is denied as described below. A policy that names `self` in its boundary or starting label still needs a `self` source to load, because it is checked before any session names a principal.
+A host names the principal in process, through the embedded runtime API, or on the HTTP hook wire as the `principal` field of `session_start`. The wire carries one only under kagent, and only when the runtime sets `APPA_SESSION_PRINCIPAL=wire`; the default `none` refuses a `session_start` that carries one. The kagent plugins send the caller's `x-user-id` header. `/hook` does not authenticate its caller, so set `wire` only when kagent authenticates its users and no other client can reach `/hook`. OpenAPPA takes the principal on the host's word; it does not authenticate it. Only a host that authenticated the person should name one, and the principal must be the address the membership services report for that person. A multi-user host usually leaves `[policy.audience] self` empty, so a session that names no principal cannot establish `self` and is denied as described below. A policy that names `self` in its boundary or starting label still needs a `self` source to load, because it is checked before any session names a principal.
 
 A policy can omit `self` or `internal`. A check that needs the members of an omitted level — for example, `contains = ["internal"]` after a `delta` narrowed the audience to `self` — cannot be established. OpenAPPA denies that call and names the missing key; proposing the call again does not change the answer.
 
@@ -1041,7 +1041,7 @@ This section governs a `subagent fork`: a child started by an approved spawn in 
 
 A child agent can read data without exposing it to the parent agent. `context_control = true` declares that the integration keeps the child's data separate and can withhold its answer until OpenAPPA allows it. The parent chooses how the answer will be checked or cleaned before the child starts.
 
-OpenAPPA first offers a plan that checks the child's answer without changing it. It then offers plans that use the registered `tool_output` sanitizers without tags.
+OpenAPPA first offers a plan that checks the child's answer without changing it. It then offers plans that use the registered `tool_output` sanitizers without tags. Last, it offers a plan that takes no answer.
 
 The parent supplies `label` to specify the audience and trust limits for the child's answer. `label = {}` uses the parent's current audience and trust rank, so the answer cannot add restrictions to the parent. If a plan uses a sanitizer, the cleaned answer must meet those limits.
 
@@ -1071,13 +1071,25 @@ The parent selects this sanitizer's plan by its `offer_id`. This request keeps t
 
 The chosen limits also restrict what the child can read: it must still be able to return an answer that meets them, with the selected sanitizer if needed. The child receives its answer requirements when it starts and submits its answer when it finishes its turn. If the answer does not meet those requirements, OpenAPPA explains the problem so the child can revise it.
 
+#### Void returns
+
+The plan that takes no answer declares a `void return`. The parent passes only the `offer_id`, without `label` or `return_schema`:
+
+```json
+{ "offer_id": "<the void offer ID>" }
+```
+
+Nothing the child says crosses to the parent, so the child cannot change the parent's label. No limit restricts what the child can read: it can accept any restriction its task needs. The child must end with an empty final message. OpenAPPA blocks a final message that has text, and a `StructuredOutput` call, and tells the child to stop with an empty message.
+
+Use a void return when the parent needs no answer, for example when the child acts through its own tools. The guarantee covers the child's answer only. The child's own tool calls stay subject to their contracts, as in any trajectory.
+
 ### Fan-out spawns
 
 A `fan-out spawn` starts any number of subagents under one return declaration. Claude Code's `Workflow` tool is one: its script starts agents that the parent never addresses one at a time. The parent declares the return once, at the spawn, and the declaration applies to every agent the spawn starts.
 
 - Each agent binds its own fork when it starts. It starts at the parent's label at that moment, so an agent started after another agent's answer crossed starts at the label that answer left on the parent.
 - Each agent's answer is checked separately under the declaration. An agent called with a schema answers through its `StructuredOutput` call; OpenAPPA checks that input as the answer and denies the call when it cannot cross. Its later stop is checked as another answer.
-- The offered plans are the plain check and the untagged `tool_output` sanitizers. `attest-schema` is not offered: it requires the parent to be trusted when the child starts, and later agents do not have to meet that.
+- The offered plans are the plain check, the untagged `tool_output` sanitizers, and the void return. `attest-schema` is not offered: it requires the parent to be trusted when the child starts, and later agents do not have to meet that.
 - Claude Code identifies the agents by the prompt the `Workflow` call ran in. A second `Workflow` in the same prompt is refused until the first one reports that it finished. After that report, no new agent binds to the spawn.
 
 The workflow's own result needs no check of its own. The script performs no I/O, so its result is built from the script, its arguments, and the agents' answers that crossed. An agent whose answer never crosses ends without a result. The same rule covers the result of a background `Agent`.

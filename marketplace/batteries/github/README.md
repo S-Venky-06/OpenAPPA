@@ -2,9 +2,9 @@
 
 Rules for the GitHub MCP server (`https://api.githubcopilot.com/mcp/`)
 with its default tool sets: your profile, repositories, issues, pull
-requests, and user search. Shared by the Claude Code and kagent plugins.
+requests, and user search. Shared by the Claude Code, kagent, and OpenCode plugins.
 Installing the battery adds its policy include; it does not create the
-MCP connection or enable tools in either host.
+MCP connection or enable tools in the host.
 
 ## Targets
 
@@ -262,7 +262,7 @@ into it accept what they may see.
 ## Change the behaviour
 
 To make a write ask a person first, add a root rule for that tool with
-`attention = ["hitl"]` in its `requires`. To treat a search of public
+`attention = ["human-approval"]` in its `requires`. To treat a search of public
 repositories as public by its query, or one repository's content as
 `internal` instead of its collaborators, add a root rule naming it
 (`query:`, `repo:`) or its whole organisation (`owner:`). Root rules run

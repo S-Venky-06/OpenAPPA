@@ -90,6 +90,11 @@ def test_ids_cross_unprefixed():
     assert (event["root_id"], event["child_id"]) == ("session-1", "child-1")
 
 
+def test_a_session_start_carries_its_principal_only_when_given():
+    assert wire.session_start("s1", principal="alice@corp.example")["principal"] == "alice@corp.example"
+    assert "principal" not in wire.session_start("s1")
+
+
 def test_absent_optionals_stay_off_the_wire():
     event = wire.spawn_result("s1", "t", {}, wire.indeterminate())
     assert "spawned_id" not in event
@@ -222,6 +227,7 @@ def test_a_deny_carries_its_offers_and_review():
             {"offer_id": "offer-1", "returns": "as_spoken"},
             {"offer_id": "offer-2", "returns": {"sanitizer": "strip-instructions"}},
             {"offer_id": "offer-3"},
+            {"offer_id": "offer-4", "returns": "void"},
         ],
         "review": [{"offer_id": "offer-3", "text": "rule on this"}],
     }
@@ -230,5 +236,6 @@ def test_a_deny_carries_its_offers_and_review():
         wire.Offer("offer-1", returns=wire.RETURN_AS_SPOKEN),
         wire.Offer("offer-2", returns=wire.RETURN_SANITIZED, sanitizer="strip-instructions"),
         wire.Offer("offer-3"),
+        wire.Offer("offer-4", returns=wire.RETURN_VOID),
     )
     assert decision.review == (("offer-3", "rule on this"),)

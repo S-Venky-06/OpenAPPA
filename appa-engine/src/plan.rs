@@ -39,16 +39,17 @@
 //! narrowing, so the sanitizer adds alternatives, never remedies for a requirement gap.
 //!
 //! **A marked spawn declares its child's return policy here.** The spawn is blocked until an
-//! approval carries one, and every plan for it ends in a `Return` step: the floor the parent
-//! supplies at execution, and the sanitizer — none, the schema attestation, or one registered
-//! untagged output sanitizer — the plan names. A child return itself is never planned: it
+//! approval carries one, and every plan for it ends in a `Return` step: no return at all, or the
+//! floor the parent supplies at execution and the sanitizer — none, the schema attestation, or
+//! one registered untagged output sanitizer — the plan names. A child return itself is never planned: it
 //! crosses at the child's stop, or is refused there, against the policy the fork recorded.
 //!
 //! **A fork's floor binds the child's remedies.** Inside a forked trajectory no plan accepts a
 //! narrowing below the floor its parent set, on the dimensions the fork's sanitizer does not
 //! raise: [`narrowing_remedies`] and [`confined_stage`] omit the acceptance, and the remaining
 //! plans stand. A grandchild's floor is declared against the child's own, so the bound is
-//! inherited down the family.
+//! inherited down the family. A void return sets no floor: nothing its child holds crosses
+//! back, so the child stands unbound, as a root does.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,7 +60,7 @@ use crate::authority::{Authority, DeclaredTransition, Mandate, Sanitizer};
 use crate::candidate::{CallStage, SanitizerLineage};
 use crate::check::{self, CallRole, Gap, Narrowing, RawBlock};
 use crate::contract::{StaticAnnotation, ToolAnnotation, ToolDeclaration};
-use crate::fact::{EffectKind, EffectSet};
+use crate::fact::{CrossingReturn, EffectKind, EffectSet, ReturnPolicy, ReturnRoute, ReturnSanitizer};
 use crate::label::{
     Audience, Evaluation, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions,
 };
@@ -85,9 +86,9 @@ impl PlanId {
 /// that admits the dispatch despite a gap; `Accept` records the agent's acceptance of the
 /// narrowing; `Withhold` binds no-result delivery to the dispatch; `Sanitize` binds an output
 /// sanitizer to the dispatch; `Return` declares the
-/// child's return policy on a marked spawn — the floor is the parent's parameter at execution,
-/// the sanitizer (none, `attest-schema` over a schema the parent also supplies, or a registered
-/// output sanitizer) is the plan's. None edits a trajectory label — `Sanitize` changes only
+/// child's return policy on a marked spawn — no return at all, or a floor that is the parent's
+/// parameter at execution behind the plan's sanitizer (none, `attest-schema` over a schema the
+/// parent also supplies, or a registered output sanitizer). None edits a trajectory label — `Sanitize` changes only
 /// which value is admitted when the result comes back, and the fold does the rest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemedyStep {
@@ -96,7 +97,7 @@ pub enum RemedyStep {
     Withhold,
     Sanitize(SanitizerName),
     Derive(SanitizerName),
-    Return(Option<SanitizerName>),
+    Return(ReturnRoute),
 }
 
 /// The result treatment a selected call remedy binds to its eventual dispatch. `None` on an
@@ -172,12 +173,11 @@ impl ExecutableRemedyPlan {
         })
     }
 
-    /// The return sanitizer this plan declares for a marked spawn's child, where the plan
-    /// declares a return policy at all: `Some(None)` for a bare floor, `Some(Some(name))` for
-    /// a floor behind the named sanitizer, `None` for a plan on an ordinary call.
-    pub fn return_step(&self) -> Option<Option<&SanitizerName>> {
+    /// The return route this plan declares for a marked spawn's child, or `None` for a plan on
+    /// an ordinary call.
+    pub fn return_step(&self) -> Option<&ReturnRoute> {
         self.steps.iter().find_map(|step| match step {
-            RemedyStep::Return(sanitizer) => Some(sanitizer.as_ref()),
+            RemedyStep::Return(route) => Some(route),
             RemedyStep::Authorize(_)
             | RemedyStep::Accept(_)
             | RemedyStep::Withhold
@@ -266,12 +266,15 @@ pub struct PlannedBlock {
 
 /// How a narrowing moves the policy's argument-free tools, judged on the current history:
 /// of `tools` analysed, `sign_off` start needing an authority and `blocked` lose every
-/// authority and input sanitizer that could clear them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// authority and input sanitizer that could clear them. `recipient_checked` names the tools
+/// with a declared variant that checks recipients from its arguments against an audience this
+/// narrowing reduces; they are not judged, since the verdict depends on the recipients.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
     pub tools: usize,
     pub sign_off: usize,
     pub blocked: usize,
+    pub recipient_checked: Vec<ToolName>,
 }
 
 /// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
@@ -284,21 +287,25 @@ pub enum ForkAdvice {
     /// trajectory may declare takes the narrowed value and hands back one this trajectory
     /// receives unchanged: it admits the narrowed label, and its derivation holds at the
     /// current label on every dimension.
+    /// `preserving_output` when an output sanitizer this block offers derives a label this
+    /// trajectory receives unchanged, so its plan clears the narrowing without accepting it.
     Narrowing {
         standing: FloorStanding,
         sanitized_return: bool,
+        preserving_output: bool,
     },
 }
 
 /// Where a narrowing stands against the floor a fork set on this trajectory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FloorStanding {
-    /// A root: no fork bounds it, and a child can take the change in its place.
+    /// No floor bounds it — a root, or a child whose parent takes no return — and a child can
+    /// take the change in its place.
     Unbound,
     /// The floor permits the change: the parent declared it to be accepted here, and a child
     /// under the same floor gains nothing.
     Within,
-    /// The floor refuses the change here and in every child under it.
+    /// The floor refuses the change here and in every child whose return crosses under it.
     Below,
 }
 
@@ -382,6 +389,7 @@ pub(crate) fn plan(
                 Some(_) => FloorStanding::Below,
             },
             sanitized_return: preserving_return_exists(registry, &current, narrowing, floor.as_ref(), context),
+            preserving_output: preserving_output_offered(registry, contract, &current, &plans, context),
         }),
     };
     let narrowing_impact = raw.narrowing.as_ref().and_then(|narrowing| {
@@ -489,8 +497,18 @@ fn narrowing_impact(
         tools: 0,
         sign_off: 0,
         blocked: 0,
+        recipient_checked: Vec::new(),
     };
+    let audience_narrows = narrowing.to.audience != narrowing.from.audience;
     for name in registry.tool_names() {
+        if audience_narrows
+            && registry
+                .variants(name)
+                .filter_map(ToolDeclaration::declared)
+                .any(ToolAnnotation::reads_recipients)
+        {
+            impact.recipient_checked.push(name.clone());
+        }
         let Some((before, after)) = registry
             .variants(name)
             .filter_map(ToolDeclaration::declared)
@@ -513,7 +531,7 @@ fn narrowing_impact(
             Standing::Clear => {}
         }
     }
-    (impact.sign_off + impact.blocked > 0).then_some(impact)
+    (impact.sign_off + impact.blocked > 0 || !impact.recipient_checked.is_empty()).then_some(impact)
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
@@ -577,7 +595,7 @@ pub(crate) fn enumerate_plans(
             &mut needs,
         );
         // An ordinary call declares no return policy; a marked spawn declares exactly one.
-        let returns: Vec<Option<Option<SanitizerName>>> = match role {
+        let returns: Vec<Option<ReturnRoute>> = match role {
             CallRole::Ordinary => vec![None],
             CallRole::MarkedSpawn(kind) => return_options(registry, floor, kind).into_iter().map(Some).collect(),
         };
@@ -593,8 +611,8 @@ pub(crate) fn enumerate_plans(
                     if let NarrowingSettlement::Sanitize(sanitizer) = settlement {
                         steps.push(RemedyStep::Sanitize(sanitizer.clone()));
                     }
-                    if let Some(sanitizer) = declares {
-                        steps.push(RemedyStep::Return(sanitizer.clone()));
+                    if let Some(route) = declares {
+                        steps.push(RemedyStep::Return(route.clone()));
                     }
                     candidates.push(PlanCandidate {
                         steps,
@@ -1190,21 +1208,23 @@ impl Floor {
     }
 }
 
-/// The floor that binds this trajectory, or `None` for a root, which no fork bounds.
+/// The floor that binds this trajectory, or `None` for a root or a child whose parent takes no
+/// return, which no floor bounds.
 pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
     let trajectory = views.trajectory();
-    let policy = views.return_policy_of(trajectory)?;
+    let policy = views.return_policy_of(trajectory)?.crossing()?;
     let parent = views.parent_of(trajectory)?;
     let raised = policy
-        .sanitizer_name()
-        .and_then(|name| registry.sanitizer(&name))
+        .sanitizer
+        .as_ref()
+        .and_then(|sanitizer| registry.sanitizer(&sanitizer.name()))
         .map(|sanitizer| sanitizer.transition.applied());
     Some(Floor::new(policy.floor.combine(&views.branch_label(parent)), raised))
 }
 
-/// The return sanitizers a marked spawn may declare here, in registry name order behind the
-/// bare floor: the reserved attestation when it is registered, and every untagged output
-/// sanitizer. Under a floor, a sanitizer whose mandate lands below it is not offered — the
+/// The return routes a marked spawn may declare here: the bare floor, then in registry name order
+/// the reserved attestation when it is registered and every untagged output sanitizer, then no
+/// return. Under a floor, a sanitizer whose mandate lands below it is not offered — the
 /// grandchild's return could never cross the child. A fan-out spawn is not offered the
 /// attestation: it holds only for a child started while the parent is trusted, which the
 /// declaration checks once and a fan-out's later children need not meet.
@@ -1212,8 +1232,8 @@ pub(crate) fn return_options(
     registry: &Registry,
     floor: Option<&Floor>,
     kind: crate::transition::SpawnKind,
-) -> Vec<Option<SanitizerName>> {
-    let mut options = vec![None];
+) -> Vec<ReturnRoute> {
+    let mut options = vec![ReturnRoute::Raw];
     options.extend(
         registry
             .sanitizers()
@@ -1224,9 +1244,37 @@ pub(crate) fn return_options(
                     Floor::new(floor.label().clone(), None).holds(&sanitizer.transition.applied().derive(floor.label()))
                 })
             })
-            .map(|sanitizer| Some(sanitizer.name.clone())),
+            .map(|sanitizer| ReturnRoute::Sanitized(sanitizer.name.clone())),
     );
+    options.push(ReturnRoute::Void);
     options
+}
+
+/// Does an offered output-sanitizer plan derive, from the label its sanitizer binds over, one
+/// `current` receives unchanged? Advice costs the block no directory read: an undecided
+/// derivation counts as no such plan.
+fn preserving_output_offered(
+    registry: &Registry,
+    contract: &ToolAnnotation,
+    current: &Label,
+    plans: &[RemedyPlan],
+    context: &MembershipContext<'_>,
+) -> bool {
+    let unanswered = Expansions::default();
+    let context = MembershipContext::new(context.within, context.providers, &unanswered);
+    let output = contract.output_label();
+    plans
+        .iter()
+        .filter_map(RemedyPlan::executable)
+        .filter_map(|plan| match plan.output_remedy() {
+            Some(OutputRemedy::Sanitize(name)) => registry.sanitizer(&name),
+            Some(OutputRemedy::Withhold) | None => None,
+        })
+        .any(|sanitizer| {
+            sanitizer
+                .derive_output(&output, &contract.tags, &context)
+                .is_ok_and(|derived| derived.is_some_and(|derived| current.combine(&derived) == *current))
+        })
 }
 
 /// Does a return sanitizer this trajectory may declare take the narrowed value and hand back
@@ -1246,8 +1294,10 @@ fn preserving_return_exists(
     let unchanged = Floor::new(current.clone(), None);
     return_options(registry, floor, crate::transition::SpawnKind::Single)
         .into_iter()
-        .flatten()
-        .filter_map(|name| registry.sanitizer(&name))
+        .filter_map(|route| match route {
+            ReturnRoute::Sanitized(name) => registry.sanitizer(&name),
+            ReturnRoute::Raw | ReturnRoute::Void => None,
+        })
         .filter(|sanitizer| {
             !sanitizer.name.is_attest_schema()
                 || attest_ceiling(&sanitizer.transition).is_some_and(|ceiling| current.meets_floor(ceiling))
@@ -1262,8 +1312,8 @@ fn preserving_return_exists(
 /// Why a parent's declared return policy is not one its spawn's plan can carry.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ReturnPolicyRefusal {
-    #[error("the declared return sanitizer is not the one the selected plan names")]
-    SanitizerMismatch,
+    #[error("the declared return route is not the one the selected plan names")]
+    RouteMismatch,
     #[error(
         "the floor stands above this trajectory's label: a child starts at that label and cannot rise to the floor"
     )]
@@ -1276,7 +1326,8 @@ pub enum ReturnPolicyRefusal {
     SanitizerUnavailable,
 }
 
-/// Is `policy` the declaration `step` asks for, at this trajectory's label? The floor sits at or
+/// Is `policy` the declaration `step` asks for, at this trajectory's label? A void return
+/// declares nothing to check: no value crosses it. The floor sits at or
 /// below the label — a child starts there and only descends — and at or above the floor this
 /// trajectory itself stands under, so a grandchild inherits the bound; an attestation needs the
 /// reserved sanitizer registered at a rank this label covers; a named sanitizer is a registered
@@ -1284,12 +1335,19 @@ pub enum ReturnPolicyRefusal {
 pub(crate) fn declared_return_policy(
     registry: &Registry,
     views: &Views,
-    step: Option<&SanitizerName>,
-    policy: &crate::fact::ReturnPolicy,
+    step: &ReturnRoute,
+    policy: &ReturnPolicy,
 ) -> Result<(), ReturnPolicyRefusal> {
-    if policy.sanitizer_name().as_ref() != step {
-        return Err(ReturnPolicyRefusal::SanitizerMismatch);
+    if policy.route() != *step {
+        return Err(ReturnPolicyRefusal::RouteMismatch);
     }
+    match policy {
+        ReturnPolicy::Void => Ok(()),
+        ReturnPolicy::Crossing(crossing) => declared_crossing(registry, views, crossing),
+    }
+}
+
+fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn) -> Result<(), ReturnPolicyRefusal> {
     let current = views.current_label();
     if current.combine(&policy.floor) != policy.floor {
         return Err(ReturnPolicyRefusal::FloorAboveLabel);
@@ -1299,7 +1357,7 @@ pub(crate) fn declared_return_policy(
     }
     match &policy.sanitizer {
         None => Ok(()),
-        Some(crate::fact::ReturnSanitizer::Attest(_)) => {
+        Some(ReturnSanitizer::Attest(_)) => {
             let registered = registry
                 .sanitizer(&SanitizerName::new(SanitizerName::ATTEST_SCHEMA))
                 .ok_or(ReturnPolicyRefusal::AttestUnavailable)?;
@@ -1311,10 +1369,8 @@ pub(crate) fn declared_return_policy(
         }
         // The reserved route attests a shape: naming it without one would take the
         // generic sanitizer path, which validates nothing.
-        Some(crate::fact::ReturnSanitizer::Named(name)) if name.is_attest_schema() => {
-            Err(ReturnPolicyRefusal::SanitizerMismatch)
-        }
-        Some(crate::fact::ReturnSanitizer::Named(name)) => match registry.sanitizer(name) {
+        Some(ReturnSanitizer::Named(name)) if name.is_attest_schema() => Err(ReturnPolicyRefusal::RouteMismatch),
+        Some(ReturnSanitizer::Named(name)) => match registry.sanitizer(name) {
             Some(registered) if registered.on.output && registered.applies_to(&[]) => Ok(()),
             _ => Err(ReturnPolicyRefusal::SanitizerUnavailable),
         },
@@ -3550,6 +3606,11 @@ mod tests {
                     gated.requires.history = vec![HistoryRequirement::Prior(EffectKind::new("approved"))];
                     gated
                 },
+                tool(
+                    "post(scope:any)",
+                    &["mail"],
+                    vec![RecipientSpec::Placeholder("to".to_string())],
+                ),
                 tool("reply", &[], vec![RecipientSpec::Placeholder("to".to_string())]),
             ]),
             authorities: vec![Authority {
@@ -3588,10 +3649,29 @@ mod tests {
                 tools: 5,
                 sign_off: 1,
                 blocked: 2,
+                recipient_checked: vec![ToolName::new("post"), ToolName::new("reply")],
             }),
             "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
              fetch; share and notify (an input hop through scrub), gated (a call to approve) and reply (its arguments) are \
-             not analysed"
+             not analysed; post's argument-named variant and reply check recipients the narrowed audience reduces"
+        );
+        let parts = crate::label::TestContext::default();
+        let trust_only = Narrowing {
+            from: known(TRUSTED, Audience::public()),
+            to: known(SUSPICIOUS, Audience::public()),
+        };
+        assert!(
+            narrowing_impact(
+                &registry,
+                &trust_only,
+                &EffectSet::default(),
+                None,
+                &|_| false,
+                &|_| false,
+                &parts.context(),
+            )
+            .is_none_or(|impact| impact.recipient_checked.is_empty()),
+            "a narrowing that keeps the audience moves no recipient check"
         );
         let narrowed = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("insider")])))];
         assert_eq!(
@@ -3670,6 +3750,7 @@ mod tests {
                 tools: 3,
                 sign_off: 2,
                 blocked: 0,
+                recipient_checked: vec![],
             }),
             "audit's org variant is blocked before and after, so its other variant's move is no news"
         );
@@ -3679,6 +3760,7 @@ mod tests {
                 tools: 3,
                 sign_off: 1,
                 blocked: 0,
+                recipient_checked: vec![],
             }),
             "under a trusted floor lookup's drop to suspicious never settles, before or after"
         );
@@ -3724,6 +3806,7 @@ mod tests {
             Some(ForkAdvice::Narrowing {
                 standing: FloorStanding::Unbound,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a root with no return sanitizer registered is told a child can take the change, unsanitized"
         );

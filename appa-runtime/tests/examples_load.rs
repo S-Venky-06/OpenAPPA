@@ -160,6 +160,107 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
     Runtime::open(config, database, None).expect("the composed deployment opens");
 }
 
+/// The battery's tools other than the seven its argument selectors were written for.
+#[cfg(unix)]
+fn session_tool(rule: &toml::Value) -> bool {
+    let name = rule["name"].as_str().expect("every rule is named");
+    let tool = name.split('(').next().expect("split yields a first part");
+    tool.strip_prefix("host/claude-code/")
+        .is_some_and(|tool| !["Bash", "Monitor", "PowerShell", "Read", "Grep", "Write", "Edit"].contains(&tool))
+}
+
+#[cfg(unix)]
+fn compiled(dir: &Path, root: &str, battery: &str) -> appa_policy::Config {
+    let battery_dir = dir.join("batteries/claude-code");
+    std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
+    std::fs::write(battery_dir.join("appa.toml"), battery).expect("the battery writes");
+    let path = dir.join("appa.toml");
+    std::fs::write(&path, root).expect("the root writes");
+    let config = Config::load(&path).expect("the layout composes");
+    appa_policy::Config::from_toml_str(&toml::to_string(config.policy_file().value()).unwrap())
+        .expect("the composed policy compiles")
+}
+
+/// The Claude Code battery carries the rules for the harness's session and web tools
+/// that the default once declared at the root. Composed with the default, each of
+/// those tools, the root's remaining SendMessage exceptions included, resolves every
+/// call to the same declaration as when the root declared them all.
+#[cfg(unix)]
+#[test]
+fn the_batterys_session_tool_rules_route_as_they_did_from_the_root() {
+    let repository = repo_root();
+    let default = std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml"))
+        .expect("the initialized default is readable");
+    let shipped = std::fs::read_to_string(repository.join("marketplace/batteries/claude-code/appa.toml"))
+        .expect("the battery is readable");
+    let include = "include = [\"batteries/claude-code/appa.toml\"]\n\n";
+
+    let mut battery: toml::Value = toml::from_str(&shipped).unwrap();
+    let (moved, kept): (Vec<_>, Vec<_>) = battery["policy"]["tool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .partition(session_tool);
+    assert!(!moved.is_empty(), "the battery carries the session tool rules");
+    let mut root: toml::Value = toml::from_str(&default).unwrap();
+    let root_rules = root["policy"]["tool"].as_array().unwrap().clone();
+    assert!(
+        !root_rules.iter().any(|rule| moved.contains(rule)),
+        "the default no longer declares them"
+    );
+    battery["policy"]["tool"] = toml::Value::Array(kept);
+    root["policy"]["tool"] = toml::Value::Array(root_rules.iter().cloned().chain(moved.iter().cloned()).collect());
+
+    let before_dir = tempfile::tempdir().unwrap();
+    let after_dir = tempfile::tempdir().unwrap();
+    let before = compiled(
+        before_dir.path(),
+        &format!("{include}{}", toml::to_string(&root).unwrap()),
+        &toml::to_string(&battery).unwrap(),
+    );
+    let after = compiled(after_dir.path(), &format!("{include}{default}"), &shipped);
+
+    let tool_of = |rule: &toml::Value| {
+        let name = rule["name"].as_str().unwrap().to_owned();
+        let tool = name.split('(').next().unwrap().to_owned();
+        (name, tool)
+    };
+    let moved_tools: Vec<String> = moved.iter().map(|rule| tool_of(rule).1).collect();
+    let mut probes = Vec::new();
+    for (name, _) in moved
+        .iter()
+        .chain(&root_rules)
+        .map(tool_of)
+        .filter(|(_, tool)| moved_tools.contains(tool))
+    {
+        let (tool, selector) = name.split_once('(').unwrap_or((&name, ""));
+        probes.push((tool.to_owned(), serde_json::json!({})));
+        if let Some((key, pattern)) = selector.trim_end_matches(')').split_once(':') {
+            probes.push((
+                tool.to_owned(),
+                serde_json::json!({ key: pattern.replace('*', "probe") }),
+            ));
+            probes.push((tool.to_owned(), serde_json::json!({ key: "elsewhere" })));
+        }
+    }
+    let route = |policy: &appa_policy::Config, tool: &str, arguments: &serde_json::Value| {
+        let engine = policy.engine();
+        engine
+            .resolve_call(
+                appa_engine::value::ToolName::new(tool),
+                arguments.to_string().as_bytes(),
+            )
+            .map(|call| engine.registry().declaration(&call).cloned())
+            .map_err(|error| error.to_string())
+    };
+    for (tool, arguments) in &probes {
+        let routed = route(&after, tool, arguments);
+        assert!(matches!(routed, Ok(Some(_))), "{tool} {arguments}: {routed:?}");
+        assert_eq!(routed, route(&before, tool, arguments), "{tool} {arguments}");
+    }
+}
+
 /// The shipped default and battery leave `audiences` omitted, so each Annotator's mandate
 /// is the policy's whole audience vocabulary: the chain words and every reader a
 /// declaration names — a reader the deployer adds included.

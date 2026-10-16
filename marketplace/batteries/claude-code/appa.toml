@@ -1,4 +1,8 @@
-# Optional Claude Code rules for Bash, Monitor, PowerShell, Read, Grep, Write and Edit.
+# Optional Claude Code rules for its built-in tools: Bash, Monitor, PowerShell,
+# Read, Grep, Write and Edit first, then the tools that stay inside the
+# session and the tools that bring outside content into it. The built-in tool
+# set varies by Claude Code version; regenerate the list from a live session
+# when it drifts.
 #
 # Order matters: the first matching rule wins, so the argument-selected
 # credential rules come before each tool's bare rule. A name written
@@ -161,7 +165,7 @@ tags = ["credentials"]
 [[policy.annotator]]
 name = "claude-code.bash-repository-requirements"
 builtin = "claude-code"
-hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience; its trust is trusted only when the finding shows every author of the returned text is an owner, member, or collaborator of the repository, or a bot."
+hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience."
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*git push*)"
@@ -965,22 +969,22 @@ delta = {}
 # other path takes the session's label as it is.
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*/.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*/appa/appa.toml)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*/appa/batteries/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
@@ -1255,22 +1259,22 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*/.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:.claude/settings*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*/appa/appa.toml)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*/appa/batteries/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
@@ -1545,12 +1549,12 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*.mcp.json)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Write(file_path:*.claude/hooks/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
@@ -1620,12 +1624,12 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*.mcp.json)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:*.claude/hooks/*)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = {}
 
 [[policy.tool]]
@@ -1691,4 +1695,295 @@ delta = {}
 [[policy.tool]]
 name = "host/claude-code/Edit"
 description = "Replaces text in a file."
+delta = {}
+
+# --- tools whose results stay inside the session's trust boundary ---
+
+[[policy.tool]]
+name = "host/claude-code/AskUserQuestion"
+delta = {}
+
+# An artifact is private to this user until they share it from claude.ai, so
+# publishing, its data and its comments reach `self`.
+[[policy.tool]]
+name = "host/claude-code/Artifact"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ArtifactComments"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ArtifactData"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/BashOutput"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/CronCreate"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/CronDelete"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/CronList"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/EndConversation"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/EnterPlanMode"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/EnterWorktree"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ExitPlanMode"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ExitWorktree"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Glob"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/KillShell"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/LSP"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ListAgents"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ListMcpResourcesTool"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/NotebookEdit"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/PushNotification"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ReadMcpResourceDirTool"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ReportFindings"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ScheduleWakeup"
+delta = {}
+
+# A feedback draft is queued locally and sent only after this user approves it.
+[[policy.tool]]
+name = "host/claude-code/SendFeedback"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/SendUserFile"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Skill"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/SlashCommand"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/TaskCreate"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/TaskGet"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/TaskList"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/TaskOutput"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/TaskStop"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/TaskUpdate"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/TodoWrite"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/ToolSearch"
+delta = {}
+
+# --- tools that bring outside content into the session ---
+
+# Vendor-written docs and OpenAPPA's own sites: the operator may see the URL,
+# and strangers do not write the page. Each host ends in `/` so a lookalike
+# host such as `code.claude.com.example` falls through to the bare rule.
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://openappa.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://archestra.ai/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://code.claude.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.anthropic.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://platform.claude.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://developers.openai.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://learn.chatgpt.com/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://doc.rust-lang.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.python.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.astral.sh/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://www.typescriptlang.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://nodejs.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://developer.mozilla.org/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://modelcontextprotocol.io/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://kubernetes.io/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://helm.sh/*)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://docs.github.com/*)"
+delta = {}
+
+# Google sees the search query; strangers write the results.
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://www.google.com/search?*)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/WebFetch(url:https://google.com/search?*)"
+delta = { trust = "suspicious" }
+
+# Web pages and search results are authored outside the session, and the URL
+# or query itself leaves it: a public sink and an untrusted source at once.
+[[policy.tool]]
+name = "host/claude-code/WebFetch"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/WebSearch"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+# An inbox message and a resource of any MCP server arrive without the label
+# of whoever wrote them. GitHub notifications carry comments anyone can write.
+[[policy.tool]]
+name = "host/claude-code/FetchInboxMessage"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/ReadMcpResourceTool"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/ReadNotifications"
+delta = { trust = "suspicious" }
+
+# A claude.ai design-system project is shared with this user's organization.
+[[policy.tool]]
+name = "host/claude-code/DesignSync"
+requires = { audience = { contains = ["internal"] } }
+delta = {}
+
+# A routine runs in a cloud session this policy does not protect, so its
+# prompt may reach anyone. Run titles and logs quote what that session read
+# from repositories, issues and web pages.
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:list_runs)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:get_run_log)"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:list)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger(action:get)"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/RemoteTrigger"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+# A name may belong to any session, including one APPA does not protect, so a
+# send is a public sink. A root whose runtime verifies protected peers precedes
+# this rule with its exceptions for their addresses.
+[[policy.tool]]
+name = "host/claude-code/SendMessage"
+requires = { audience = { contains = ["public"] } }
 delta = {}

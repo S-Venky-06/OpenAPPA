@@ -14,7 +14,7 @@ use crate::label::{Expansions, Label, MembershipContext, ReaderId, SymbolicAtom}
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, BlockedCall, PlannedBlock};
-use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV2};
+use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentity};
 use crate::projection::Projection;
 use crate::projection::Views;
 use crate::registry::{LoadError, Registry, ToolKind};
@@ -61,7 +61,10 @@ pub enum ForkStatus {
 #[derive(Clone, Debug)]
 pub struct Engine {
     registry: Registry,
-    identity: PolicyIdentityV2,
+    identity: PolicyIdentity,
+    /// What earlier identity algorithms give this policy: the digest an opening an earlier engine
+    /// recorded names it by.
+    earlier_identities: Vec<PolicyIdentity>,
     dialect: PolicyDialectVersion,
 }
 
@@ -90,10 +93,12 @@ impl Engine {
         let profile = DeploymentProfile::declare(declaration.clone())?;
         let registry = Registry::build(config, planner_cap, profile)?;
         profile::validate_coverage(&registry, &declaration)?;
-        let identity = PolicyIdentityV2::of_registry(&registry);
+        let identity = PolicyIdentity::of_registry(&registry);
+        let earlier_identities = PolicyIdentity::earlier_of_registry(&registry);
         Ok(Engine {
             registry,
             identity,
+            earlier_identities,
             dialect,
         })
     }
@@ -106,8 +111,21 @@ impl Engine {
         self.registry.profile()
     }
 
-    pub fn identity(&self) -> PolicyIdentityV2 {
+    pub fn identity(&self) -> PolicyIdentity {
         self.identity
+    }
+
+    /// Whether a durable opening's `policy_digest` names this engine's policy: its identity, or
+    /// the identity an earlier identity algorithm gives the same policy. Every opening this engine
+    /// records carries [`Engine::identity`].
+    pub fn recognizes(&self, digest: &PolicyIdentity) -> bool {
+        *digest == self.identity || self.earlier_identities.contains(digest)
+    }
+
+    /// What earlier identity algorithms give this policy, newest first. Empty for a policy no
+    /// earlier algorithm could express.
+    pub fn earlier_identities(&self) -> &[PolicyIdentity] {
+        &self.earlier_identities
     }
 
     /// The open vectors derived from the validated declaration and the registered tool set —
@@ -714,7 +732,10 @@ impl Engine {
             }
             ChildSubmission::Value { body } => body.clone(),
         };
-        let policy = views.return_policy_of(child).ok_or(TransitionError::NotForked)?.clone();
+        let ReturnPolicy::Crossing(policy) = views.return_policy_of(child).ok_or(TransitionError::NotForked)?.clone()
+        else {
+            return Err(TransitionError::ReturnVoid);
+        };
         let floor = plan::floor_of(&self.registry, &projection.view(child))
             .expect("a forked child stands under its fork's floor");
         let fold = views.branch_label(child);
@@ -3758,7 +3779,7 @@ mod tests {
         let mut facts = appended_facts(blocked);
         let offer = opened_offers(&facts)
             .into_iter()
-            .find_map(|(offer, plan)| (plan.return_step() == Some(policy.sanitizer_name().as_ref())).then_some(offer))
+            .find_map(|(offer, plan)| (plan.return_step() == Some(&policy.route())).then_some(offer))
             .expect("the block offers the policy's declaration");
         let approved = e
             .handle(
@@ -3808,7 +3829,7 @@ mod tests {
         let mut facts = appended_facts(blocked);
         let (offer, _) = opened_offers(&facts)
             .into_iter()
-            .find(|(_, plan)| plan.return_step() == Some(None))
+            .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
             .expect("the bare declaration is offered");
         let approved = e
             .handle(
@@ -3829,7 +3850,11 @@ mod tests {
 
     /// The bare declaration: the parent's current label as the floor, no sanitizer.
     fn floor_policy(e: &Engine, log: &[Fact]) -> ReturnPolicy {
-        ReturnPolicy {
+        ReturnPolicy::Crossing(floor_crossing(e, log))
+    }
+
+    fn floor_crossing(e: &Engine, log: &[Fact]) -> crate::fact::CrossingReturn {
+        crate::fact::CrossingReturn {
             floor: viewing(e, log)
                 .views(&traj())
                 .expect("the parent is opened")
@@ -5647,9 +5672,9 @@ mod tests {
                 .collect()
         };
         let (_, blocked) = answered(&decision);
-        assert_eq!(hops(blocked), vec![vec![true, false], vec![false]]);
+        assert_eq!(hops(blocked), vec![vec![true, false], vec![false, false]]);
         assert_eq!(blocked[0].offers.len(), 2);
-        assert_eq!(blocked[1].offers.len(), 1);
+        assert_eq!(blocked[1].offers.len(), 2);
         let facts = appended_facts(decision);
         let log = [log, facts.clone()].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
@@ -5657,7 +5682,7 @@ mod tests {
         let repeat = e.handle(&viewing(&e, &log), batch()).expect("the repeat answers");
         assert!(repeat.append.is_none());
         let (_, blocked) = answered(&repeat);
-        assert_eq!(hops(blocked), vec![vec![true, false], vec![false]]);
+        assert_eq!(hops(blocked), vec![vec![true, false], vec![false, false]]);
 
         let (unmarked_hop, marked_offer) = {
             let mut opened = facts.iter().filter(|fact| matches!(fact, Fact::OfferOpened { .. }));
@@ -6368,7 +6393,7 @@ mod tests {
         log.extend(appended_facts(blocked));
         let (offer, _) = opened_offers(&log)
             .into_iter()
-            .find(|(_, plan)| plan.return_step() == Some(None))
+            .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
             .expect("the bare declaration is offered");
         let approved = e
             .handle(
@@ -6377,7 +6402,10 @@ mod tests {
                     trajectory: traj(),
                     offer,
                     outcome: OfferOutcome::Approved(Vec::new()),
-                    return_policy: Some(ReturnPolicy { floor, sanitizer: None }),
+                    return_policy: Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                        floor,
+                        sanitizer: None,
+                    })),
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
@@ -6474,8 +6502,8 @@ mod tests {
                 Some(crate::value::ForkId::member(dispatch, child))
             );
             assert_eq!(
-                e.return_policy_of(&view, child).map(|policy| policy.sanitizer),
-                Some(None)
+                e.return_policy_of(&view, child).map(|policy| policy.route()),
+                Some(crate::fact::ReturnRoute::Raw)
             );
         }
         assert_eq!(e.fork_status(&view, &fan_out), ForkStatus::FanOut);
@@ -6543,8 +6571,12 @@ mod tests {
         assert_eq!(
             tampered(&|facts| {
                 for fact in facts.iter_mut() {
-                    if let Fact::ForkPrepared { return_policy, .. } = fact {
-                        return_policy.floor = Label::bottom();
+                    if let Fact::ForkPrepared {
+                        return_policy: ReturnPolicy::Crossing(crossing),
+                        ..
+                    } = fact
+                    {
+                        crossing.floor = Label::bottom();
                     }
                 }
             }),
@@ -10503,6 +10535,32 @@ mod tests {
             }),
             Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch))
         );
+        // An opening an earlier engine recorded carries the identity its algorithm gave this
+        // policy, and names this policy as surely as the current identity does.
+        let earlier = *e
+            .earlier_identities()
+            .first()
+            .expect("a policy that forwards nothing has a v1 identity");
+        assert_ne!(earlier, e.identity(), "the algorithms differ in their domain tag");
+        assert!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
+                    *policy_digest = earlier;
+                }
+            })
+            .is_ok(),
+            "the v1 identity of this policy reopens its trajectory"
+        );
+        assert_eq!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
+                    let other = engine(vec![plain_tool("send")]);
+                    *policy_digest = other.earlier_identities()[0];
+                }
+            }),
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch)),
+            "the v1 identity of another policy does not"
+        );
         assert_eq!(
             mutated(&|fact| {
                 if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { profile, .. }) = fact {
@@ -10770,10 +10828,10 @@ mod tests {
         let e = open_engine(cfg);
         let child = TrajectoryId::new("child");
         let log = vec![opened(&e)];
-        let policy = ReturnPolicy {
+        let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
             sanitizer: Some(ReturnSanitizer::Named(crate::names::SanitizerName::new("redactor"))),
-            ..floor_policy(&e, &log)
-        };
+            ..floor_crossing(&e, &log)
+        });
         let forked = spawn_family_at(&e, &log, &child, policy.clone());
         let prepared = forked
             .iter()
@@ -11501,7 +11559,7 @@ mod tests {
         let facts = appended_facts(quiet_pair);
         let (offer, _) = opened_offers(&facts)
             .into_iter()
-            .find(|(_, plan)| plan.return_step() == Some(None))
+            .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
             .expect("the bare declaration is offered");
         let log = [log, facts].concat();
         let approved = e
@@ -13027,17 +13085,15 @@ mod tests {
         })
     }
 
-    fn return_steps(facts: &[Fact]) -> Vec<Option<SanitizerName>> {
-        let mut steps: Vec<Option<SanitizerName>> = opened_offers(facts)
+    fn return_steps(facts: &[Fact]) -> Vec<crate::fact::ReturnRoute> {
+        opened_offers(facts)
             .iter()
             .map(|(_, plan)| {
                 plan.return_step()
                     .expect("a marked spawn's plan ends in a return declaration")
-                    .cloned()
+                    .clone()
             })
-            .collect();
-        steps.sort();
-        steps
+            .collect()
     }
 
     fn named(sanitizer: &str) -> Option<ReturnSanitizer> {
@@ -13114,8 +13170,13 @@ mod tests {
         let facts = appended_facts(blocked);
         assert_eq!(
             return_steps(&facts),
-            vec![None, Some(SanitizerName::new("redactor"))],
-            "the bare floor and each untagged output sanitizer; a scoped one never reaches a return"
+            vec![
+                crate::fact::ReturnRoute::Raw,
+                crate::fact::ReturnRoute::Sanitized(SanitizerName::new("redactor")),
+                crate::fact::ReturnRoute::Void,
+            ],
+            "the bare floor, each untagged output sanitizer, then no return; a scoped sanitizer never reaches a \
+             return"
         );
         assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
 
@@ -13140,10 +13201,10 @@ mod tests {
             )
             .expect("a marked spawn blocks");
         let log = [log, appended_facts(blocked)].concat();
-        let offer_for = |sanitizer: Option<&SanitizerName>| {
+        let offer_for = |route: crate::fact::ReturnRoute| {
             opened_offers(&log)
                 .into_iter()
-                .find_map(|(offer, plan)| (plan.return_step() == Some(sanitizer)).then_some(offer))
+                .find_map(|(offer, plan)| (plan.return_step() == Some(&route)).then_some(offer))
                 .expect("the declaration is offered")
         };
         let execute = |offer, return_policy| {
@@ -13159,8 +13220,8 @@ mod tests {
                 }),
             )
         };
-        let bare = offer_for(None);
-        let redacting = offer_for(Some(&SanitizerName::new("redactor")));
+        let bare = offer_for(crate::fact::ReturnRoute::Raw);
+        let redacting = offer_for(crate::fact::ReturnRoute::Sanitized(SanitizerName::new("redactor")));
         let floor = known(SUSPICIOUS, internal.clone());
 
         assert!(matches!(
@@ -13170,35 +13231,35 @@ mod tests {
         assert!(matches!(
             execute(
                 bare,
-                Some(ReturnPolicy {
+                Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                     floor: floor.clone(),
                     sanitizer: named("redactor"),
-                })
+                }))
             ),
             Err(crate::transition::TransitionError::ReturnPolicy(
-                plan::ReturnPolicyRefusal::SanitizerMismatch
+                plan::ReturnPolicyRefusal::RouteMismatch
             ))
         ));
         assert!(matches!(
             execute(
                 redacting,
-                Some(ReturnPolicy {
+                Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                     floor: floor.clone(),
                     sanitizer: None,
-                })
+                }))
             ),
             Err(crate::transition::TransitionError::ReturnPolicy(
-                plan::ReturnPolicyRefusal::SanitizerMismatch
+                plan::ReturnPolicyRefusal::RouteMismatch
             ))
         ));
         assert!(
             matches!(
                 execute(
                     bare,
-                    Some(ReturnPolicy {
+                    Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                         floor: known(TRUSTED, internal.clone()),
                         sanitizer: None,
-                    })
+                    }))
                 ),
                 Err(crate::transition::TransitionError::ReturnPolicy(
                     plan::ReturnPolicyRefusal::FloorAboveLabel
@@ -13210,10 +13271,10 @@ mod tests {
             matches!(
                 execute(
                     bare,
-                    Some(ReturnPolicy {
+                    Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                         floor: known(SUSPICIOUS, Audience::public()),
                         sanitizer: None,
-                    })
+                    }))
                 ),
                 Err(crate::transition::TransitionError::ReturnPolicy(
                     plan::ReturnPolicyRefusal::FloorAboveLabel
@@ -13223,10 +13284,10 @@ mod tests {
         );
         let approved = execute(
             bare,
-            Some(ReturnPolicy {
+            Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                 floor: known(SUSPICIOUS, internal),
                 sanitizer: None,
-            }),
+            })),
         )
         .expect("a floor at the parent's label approves the spawn");
         assert!(matches!(
@@ -13325,6 +13386,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: true,
+                preserving_output: true,
             }),
             "the child is told a grandchild under the bare floor cannot take the drop either, but one with a \
              return sanitizer can"
@@ -13333,10 +13395,10 @@ mod tests {
         // Under a sanitizer that raises trust, the trust dimension is unbound: the child may
         // descend there, because the return climbs back through the sanitizer.
         let parent = vec![opened(&e)];
-        let lifted = ReturnPolicy {
+        let lifted = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
             sanitizer: named("redactor"),
-            ..floor_policy(&e, &parent)
-        };
+            ..floor_crossing(&e, &parent)
+        });
         let log = [parent.clone(), spawn_family_at(&e, &parent, &child, lifted)].concat();
         let blocked = e
             .handle(
@@ -13361,8 +13423,10 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Within,
                 sanitized_return: true,
+                preserving_output: true,
             }),
-            "a drop the floor permits is to be accepted here, not delegated again"
+            "a drop the floor permits is to be accepted here, not delegated again, unless the offered output \
+             sanitizer keeps this trajectory's label"
         );
         let internal = call("read_internal", json!({ "who": "someone" }));
         let blocked = e
@@ -13387,9 +13451,129 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a trust-raising sanitizer lifts no audience drop, so no sanitized delegation is advised"
         );
+    }
+
+    #[test]
+    fn a_void_child_accepts_any_narrowing_and_ends_only_with_an_empty_stop() {
+        let e = open_engine(returning_registry(vec![]));
+        let child = TrajectoryId::new("child");
+        let parent = vec![opened(&e)];
+        let log = [parent.clone(), spawn_family_at(&e, &parent, &child, ReturnPolicy::Void)].concat();
+        let read = call("read_suspicious", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&child, "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(
+            block
+                .block
+                .plans
+                .iter()
+                .filter_map(crate::plan::RemedyPlan::executable)
+                .any(|plan| plan.narrowing().is_some()),
+            "no floor bounds a child whose parent takes no return, so the drop is offered"
+        );
+        let log = [log, appended_facts(blocked)].concat();
+        let parent_label = viewing(&e, &log)
+            .views(&traj())
+            .expect("the parent is opened")
+            .current_label();
+
+        assert_eq!(
+            e.handle(
+                &viewing(&e, &log),
+                child_report(
+                    &log,
+                    &child,
+                    ChildSubmission::Value {
+                        body: ValueBody::new("Done.")
+                    }
+                )
+            )
+            .map(|_| ()),
+            Err(TransitionError::ReturnVoid)
+        );
+        let ended = e
+            .handle(&viewing(&e, &log), child_report(&log, &child, ChildSubmission::Void))
+            .expect("an empty stop ends the child");
+        assert!(matches!(ended.follow_up, FollowUp::Child(ChildFollowUp::Ended)));
+        let log = [log, appended_facts(ended)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(
+            viewing(&e, &log)
+                .views(&traj())
+                .expect("the parent is opened")
+                .current_label(),
+            parent_label
+        );
+    }
+
+    #[test]
+    fn a_crossing_recorded_under_a_void_fork_does_not_replay() {
+        let e = open_engine(returning_registry(vec![]));
+        let child = TrajectoryId::new("child");
+        let parent = vec![opened(&e)];
+        let floored = spawn_family(&e, &child);
+        let crossing = crossed(&e, &floored, &child, "Done.");
+        let void = [parent.clone(), spawn_family_at(&e, &parent, &child, ReturnPolicy::Void)].concat();
+        assert_eq!(
+            e.validate_replay(&[void, crossing].concat()),
+            Err(TransitionRefusal::ReturnVoid)
+        );
+    }
+
+    #[test]
+    fn a_void_declaration_answers_only_the_void_plan() {
+        let e = open_engine(returning_registry(vec![]));
+        let log = vec![opened(&e)];
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                spawn_batch("marked", Some(crate::transition::SpawnMark::at(0))),
+            )
+            .expect("a marked spawn blocks");
+        let log = [log, appended_facts(blocked)].concat();
+        let offer_for = |route: crate::fact::ReturnRoute| {
+            opened_offers(&log)
+                .into_iter()
+                .find_map(|(offer, plan)| (plan.return_step() == Some(&route)).then_some(offer))
+                .expect("the declaration is offered")
+        };
+        let execute = |offer, return_policy| {
+            e.handle(
+                &viewing(&e, &log),
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    return_policy: Some(return_policy),
+                    offer_nonce: nonce(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .map(|_| ())
+        };
+        let mismatch = Err(crate::transition::TransitionError::ReturnPolicy(
+            plan::ReturnPolicyRefusal::RouteMismatch,
+        ));
+        assert_eq!(
+            execute(offer_for(crate::fact::ReturnRoute::Void), floor_policy(&e, &log)),
+            mismatch
+        );
+        assert_eq!(
+            execute(offer_for(crate::fact::ReturnRoute::Raw), ReturnPolicy::Void),
+            mismatch
+        );
+        assert!(execute(offer_for(crate::fact::ReturnRoute::Void), ReturnPolicy::Void).is_ok());
     }
 
     #[test]
@@ -13413,6 +13597,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Below,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "with no return sanitizer registered, no grandchild can take the drop either"
         );
@@ -13444,6 +13629,7 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Unbound,
                 sanitized_return: false,
+                preserving_output: false,
             }),
             "a sanitizer whose `from` the suspicious value fails would refuse the child's return"
         );
@@ -13464,8 +13650,46 @@ mod tests {
             Some(crate::plan::ForkAdvice::Narrowing {
                 standing: crate::plan::FloorStanding::Unbound,
                 sanitized_return: true,
+                preserving_output: true,
             }),
-            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route"
+            "a sanitizer admitting the suspicious value and raising it back to trusted is the sanitized route, \
+             and offered on the read's output it keeps this trajectory's label"
+        );
+    }
+
+    #[test]
+    fn an_output_sanitizer_that_leaves_a_narrowing_does_not_preserve_the_label() {
+        let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
+        let log = vec![opened(&e)];
+        let read = call("read_suspicious_internal", json!({ "who": "someone" }));
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(&traj(), "read", Vec::new(), vec![raw(&read)], None),
+            )
+            .expect("a narrowing read blocks");
+        let ([], [block]) = answered(&blocked) else {
+            panic!("the read blocks, got {:?}", answered(&blocked))
+        };
+        assert!(
+            block
+                .block
+                .plans
+                .iter()
+                .filter_map(crate::plan::RemedyPlan::executable)
+                .any(|plan| plan.sanitizer().is_some()),
+            "the trust-lifting sanitizer is offered on the read's output"
+        );
+        assert!(
+            matches!(
+                block.block.fork_advice,
+                Some(crate::plan::ForkAdvice::Narrowing {
+                    preserving_output: false,
+                    ..
+                })
+            ),
+            "the offer still narrows the audience, so it keeps no label: {:?}",
+            block.block.fork_advice
         );
     }
 
@@ -13488,10 +13712,10 @@ mod tests {
         );
 
         let lifted = TrajectoryId::new("lifted");
-        let policy = ReturnPolicy {
+        let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
             sanitizer: named("redactor"),
-            ..floor_policy(&e, &root_log)
-        };
+            ..floor_crossing(&e, &root_log)
+        });
         let log = [root_log.clone(), spawn_family_at(&e, &root_log, &lifted, policy)].concat();
         assert_eq!(
             e.lowest_return_trust(&viewing(&e, &log).views(&lifted).expect("the child is opened")),
@@ -13584,6 +13808,7 @@ mod tests {
 
     #[test]
     fn a_fan_out_spawn_is_offered_every_return_route_but_the_attestation() {
+        use crate::fact::ReturnRoute;
         let e = open_engine(returning_registry(vec![
             lifting_sanitizer("attest-schema"),
             lifting_sanitizer("scrub"),
@@ -13593,23 +13818,21 @@ mod tests {
             let blocked = e
                 .handle(&viewing(&e, &log), spawn_batch("marked", Some(mark)))
                 .expect("a marked spawn blocks");
-            let mut routes: Vec<Option<String>> = opened_offers(&appended_facts(blocked))
-                .into_iter()
-                .filter_map(|(_, plan)| {
-                    plan.return_step()
-                        .map(|route| route.map(|name| name.as_str().to_string()))
-                })
-                .collect();
-            routes.sort();
-            routes
+            return_steps(&appended_facts(blocked))
         };
+        let sanitized = |name: &str| ReturnRoute::Sanitized(SanitizerName::new(name));
         assert_eq!(
             routes(crate::transition::SpawnMark::at(0)),
-            vec![None, Some("attest-schema".to_string()), Some("scrub".to_string())]
+            vec![
+                ReturnRoute::Raw,
+                sanitized("attest-schema"),
+                sanitized("scrub"),
+                ReturnRoute::Void
+            ]
         );
         assert_eq!(
             routes(crate::transition::SpawnMark::fan_out(0)),
-            vec![None, Some("scrub".to_string())]
+            vec![ReturnRoute::Raw, sanitized("scrub"), ReturnRoute::Void]
         );
     }
 
@@ -13627,7 +13850,9 @@ mod tests {
         let attest = SanitizerName::new(SanitizerName::ATTEST_SCHEMA);
         let offer = opened_offers(&log)
             .into_iter()
-            .find_map(|(offer, plan)| (plan.return_step() == Some(Some(&attest))).then_some(offer))
+            .find_map(|(offer, plan)| {
+                (plan.return_step() == Some(&crate::fact::ReturnRoute::Sanitized(attest.clone()))).then_some(offer)
+            })
             .expect("the attestation is offered");
         let execute = |sanitizer| {
             e.handle(
@@ -13636,10 +13861,10 @@ mod tests {
                     trajectory: traj(),
                     offer,
                     outcome: OfferOutcome::Approved(Vec::new()),
-                    return_policy: Some(ReturnPolicy {
+                    return_policy: Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                         sanitizer,
-                        ..floor_policy(&e, &log)
-                    }),
+                        ..floor_crossing(&e, &log)
+                    })),
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
@@ -13649,7 +13874,7 @@ mod tests {
         assert!(matches!(
             execute(named("attest-schema")),
             Err(crate::transition::TransitionError::ReturnPolicy(
-                plan::ReturnPolicyRefusal::SanitizerMismatch
+                plan::ReturnPolicyRefusal::RouteMismatch
             ))
         ));
         assert!(execute(Some(ReturnSanitizer::Attest(attest_shape()))).is_ok());
@@ -13660,10 +13885,10 @@ mod tests {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")]));
         let child = TrajectoryId::new("child");
         let parent = vec![opened(&e)];
-        let policy = ReturnPolicy {
+        let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
             sanitizer: Some(ReturnSanitizer::Attest(attest_shape())),
-            ..floor_policy(&e, &parent)
-        };
+            ..floor_crossing(&e, &parent)
+        });
         let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
         // The attestation raises trust, so the child may descend there.
@@ -13732,10 +13957,10 @@ mod tests {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
         let child = TrajectoryId::new("child");
         let parent = vec![opened(&e)];
-        let policy = ReturnPolicy {
+        let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
             sanitizer: named("redactor"),
-            ..floor_policy(&e, &parent)
-        };
+            ..floor_crossing(&e, &parent)
+        });
         let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
         reads(&e, &mut log, &child, "read_suspicious");
 
@@ -13890,10 +14115,10 @@ mod tests {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")]));
         let child = TrajectoryId::new("child");
         let parent = vec![opened(&e)];
-        let policy = ReturnPolicy {
+        let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
             sanitizer: named("redactor"),
-            ..floor_policy(&e, &parent)
-        };
+            ..floor_crossing(&e, &parent)
+        });
         let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
         let staged = e
             .handle(
@@ -13968,9 +14193,13 @@ mod tests {
         let e = open_engine(cfg);
         let child = TrajectoryId::new("child");
         let parent = vec![opened(&e)];
-        let mut policy = floor_policy(&e, &parent);
+        let mut policy = floor_crossing(&e, &parent);
         policy.floor.audience = Audience::restricted([ReaderId::new("insider")]);
-        let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
+        let mut log = [
+            parent.clone(),
+            spawn_family_at(&e, &parent, &child, ReturnPolicy::Crossing(policy)),
+        ]
+        .concat();
         let blocked = e
             .handle(
                 &viewing(&e, &log),
@@ -14061,11 +14290,11 @@ mod tests {
         let e = open_engine(returning_registry(vec![]));
         let child = TrajectoryId::new("child");
         let log = spawn_family(&e, &child);
-        let floor = floor_policy(&e, &log).floor;
+        let floor = floor_crossing(&e, &log).floor;
         let views = viewing(&e, &log);
         assert_eq!(
-            e.return_policy_of(&views, &child).map(|policy| policy.floor),
-            Some(floor.clone())
+            e.return_policy_of(&views, &child),
+            Some(ReturnPolicy::Crossing(floor_crossing(&e, &log)))
         );
         // The child spawning its own child may declare no floor below the one it stands under.
         let batch = EngineEvent::Proposals(ProposalBatch {
@@ -14082,7 +14311,7 @@ mod tests {
         let facts = appended_facts(blocked);
         let (offer, _) = opened_offers(&facts)
             .into_iter()
-            .find(|(_, plan)| plan.return_step() == Some(None))
+            .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
             .expect("the bare declaration is offered");
         let log = [log, facts].concat();
         let execute = |floor: Label| {
@@ -14092,7 +14321,10 @@ mod tests {
                     trajectory: child.clone(),
                     offer,
                     outcome: OfferOutcome::Approved(Vec::new()),
-                    return_policy: Some(ReturnPolicy { floor, sanitizer: None }),
+                    return_policy: Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                        floor,
+                        sanitizer: None,
+                    })),
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
@@ -14854,10 +15086,10 @@ mod tests {
         fn sanitized_return_log(e: &Engine) -> Vec<Fact> {
             let child = TrajectoryId::new("child");
             let opened_log = vec![opened(e)];
-            let policy = ReturnPolicy {
+            let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                 sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
-                ..floor_policy(e, &opened_log)
-            };
+                ..floor_crossing(e, &opened_log)
+            });
             let log = [opened_log.clone(), spawn_family_at(e, &opened_log, &child, policy)].concat();
             let body = ValueBody::new("what I found");
             let evidence = vec![Evidence::Sanitizer {
@@ -14957,10 +15189,10 @@ mod tests {
             let e = open_engine(returning_with_sources(vec![declassify]));
             let child = TrajectoryId::new("child");
             let opened_log = vec![opened(&e)];
-            let policy = ReturnPolicy {
+            let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                 sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
-                ..floor_policy(&e, &opened_log)
-            };
+                ..floor_crossing(&e, &opened_log)
+            });
             let log = [opened_log.clone(), spawn_family_at(&e, &opened_log, &child, policy)].concat();
             let body = ValueBody::new("what I found");
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
@@ -15073,10 +15305,10 @@ mod tests {
             let child = TrajectoryId::new("child");
             let opened_log = vec![opened(&e)];
             // The declaration binds only the trust dimension, the one the sanitizer leaves alone.
-            let policy = ReturnPolicy {
+            let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
                 floor: Label::new(SUSPICIOUS, Audience::public()),
                 sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
-            };
+            });
             let mut log = [opened_log.clone(), spawn_family_at(&e, &opened_log, &child, policy)].concat();
             reads(&e, &mut log, &child, "read_member");
             let body = ValueBody::new("what I found");
@@ -15775,9 +16007,11 @@ mod tests {
                                 authority: AuthorityName::new("officer"),
                             },
                         };
-                        let return_policy = plan.return_step().map(|_| ReturnPolicy {
-                            floor: views.current_label(),
-                            sanitizer: None,
+                        let return_policy = plan.return_step().map(|_| {
+                            ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                                floor: views.current_label(),
+                                sanitizer: None,
+                            })
                         });
                         Some(EngineEvent::ExecuteOffer(OfferExecution {
                             trajectory,

@@ -193,8 +193,8 @@ impl RuntimeTools {
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
                        feedback surfaced. The id must be quoted exactly. A plan that \
                        declares a subagent's return takes `label`, the lowest label this \
-                       session accepts from the return; a plan that attests it also takes \
-                       `return_schema`. After execution succeeds, propose the call again with \
+                       session accepts from the return, unless it takes no return; a plan \
+                       that attests it also takes `return_schema`. After execution succeeds, propose the call again with \
                        exactly the arguments the reply gives, or receive the admitted output.")]
     pub async fn execute_remedy_plan(
         &self,
@@ -296,7 +296,9 @@ impl RuntimeTools {
 
     #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
                        contradictory, or its blocking feedback or remedies are \
-                       confusing and leave no clear way forward. Say in `message` what you were \
+                       confusing and leave no clear way forward: a plan makes no sense, you \
+                       keep getting blocked, the user keeps being asked to approve similar \
+                       calls, or the user is frustrated. Say in `message` what you were \
                        trying to do, what APPA did or demanded, and why you are stuck. This \
                        sends diagnostic telemetry and will not bypass the policy or grant \
                        tool permissions. Set `with_trajectory` to include this session's APPA \
@@ -366,8 +368,8 @@ impl RuntimeToolService {
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
                        feedback surfaced. The id must be quoted exactly. A plan that \
                        declares a subagent's return takes `label`, the lowest label this \
-                       session accepts from the return; a plan that attests it also takes \
-                       `return_schema`. After execution succeeds, propose the call again with \
+                       session accepts from the return, unless it takes no return; a plan \
+                       that attests it also takes `return_schema`. After execution succeeds, propose the call again with \
                        exactly the arguments the reply gives, or receive the admitted output.")]
     pub async fn execute_remedy_plan(
         &self,
@@ -1021,7 +1023,7 @@ mod tests {
             &path,
             format!(
                 r#"
-            [server_aliases]
+            [aliases.mcp]
             github = ["{server}"]
             [externals]
             timeout_ms = 1000
@@ -1725,6 +1727,7 @@ max_body_bytes = 4096
                 control_tool: "client_one_remedy".to_owned(),
                 supports_delegation: false,
                 include_display_plan: false,
+                yell_tool: None,
             },
         )
         .await;
@@ -1735,6 +1738,7 @@ max_body_bytes = 4096
                 control_tool: "client_two_remedy".to_owned(),
                 supports_delegation: false,
                 include_display_plan: false,
+                yell_tool: None,
             },
         )
         .await;

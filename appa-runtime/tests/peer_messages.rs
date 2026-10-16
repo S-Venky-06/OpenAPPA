@@ -4,7 +4,7 @@
 //! does not narrow the receiver, and is held otherwise, to be read with `read_peer_message`.
 
 mod common;
-use common::{claude_event, claude_hook, last_offer, repo_root};
+use common::{claude_event, claude_hook, including_session_tool_rules, last_offer, repo_root};
 
 use std::path::Path;
 
@@ -18,7 +18,8 @@ const A_ADDRESS: &str = "uds:/tmp/appa-peer/a.sock";
 const B_ADDRESS: &str = "uds:/tmp/appa-peer/b.sock";
 const READ: &str = "mcp__appa__read_peer_message";
 
-/// The shipped default with `extra` rules appended to its tool rules.
+/// The shipped default and the battery's session tool rules, with `extra` rules appended
+/// to the default's tool rules.
 fn config(dir: &Path, extra: &str) -> Config {
     let example = std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped example is readable");
@@ -28,7 +29,7 @@ fn config(dir: &Path, extra: &str) -> Config {
         .expect("the example carries the context-controlling deployment");
     let text = format!("{before}{deployment}\n{extra}\n{after}");
     let path = dir.join(format!("appa-{}.toml", text.len()));
-    std::fs::write(&path, text).expect("the deployment writes");
+    std::fs::write(&path, including_session_tool_rules(dir, &text)).expect("the deployment writes");
     Config::load(&path).expect("the deployment loads")
 }
 
@@ -75,7 +76,13 @@ async fn start(runtime: &Runtime, session: &str, address: &str, principal: Optio
         None => {
             let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
             let body = serde_json::to_vec(&wire).expect("the wire event serializes");
-            let (status, answer) = hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &body).await;
+            let (status, answer) = hooks::answer(
+                runtime,
+                &appa_adapter_claude_code::adapter(),
+                appa_runtime_api::PrincipalSource::None,
+                &body,
+            )
+            .await;
             assert_eq!(status, 200, "{answer}");
         }
     }

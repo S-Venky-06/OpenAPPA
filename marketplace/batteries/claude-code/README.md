@@ -5,7 +5,8 @@ labels on the requester's own secrets. `appa plugin install claude-code`
 includes it on a first install; `appa battery remove claude-code` takes it out,
 and a later plugin install does not bring it back.
 
-It covers seven built-in tools, which the policy names `host/claude-code/Bash`,
+It covers Claude Code's built-in tools. Seven of them carry the rules below,
+which the policy names `host/claude-code/Bash`,
 `host/claude-code/Monitor`, `host/claude-code/PowerShell`,
 `host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write` and
 `host/claude-code/Edit`:
@@ -76,6 +77,25 @@ Annotator for every other command; and the same masked results. Both Annotators 
 resolve to `claude.exe`. The default config `appa plugin install claude-code`
 writes adds the wildcard fallback for tools no rule names.
 
+The other built-in tools get static rules:
+
+- **Tools that stay inside the session** — `Glob`, `Skill`, `ToolSearch`,
+  `TodoWrite`, the plan, worktree, task, cron and artifact tools, and the
+  other session-local tools take the session's label as it is. The subagent
+  tools `Agent`, `Task` and `Workflow` are the root's to declare: their rules
+  rely on the deployment controlling a subagent's context.
+- **WebFetch, WebSearch** — A page or search result is a `suspicious` source,
+  and the URL or query is a `public` sink. A fetch from a listed
+  documentation host keeps the session's label. A Google search URL requires
+  no audience and returns `suspicious` results.
+- **Content from elsewhere** — `FetchInboxMessage`, `ReadMcpResourceTool`,
+  `ReadNotifications`, and the run titles and logs of `RemoteTrigger` return
+  `suspicious` content. Starting a remote routine is a `public` sink;
+  `DesignSync` requires `internal`.
+- **SendMessage** — A send is a `public` sink. The default root precedes this
+  rule with exceptions for protected sessions' socket and pipe addresses,
+  which the runtime verifies.
+
 ## Add it to a deployment
 
 ```toml
@@ -110,7 +130,7 @@ modifying the battery:
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-hint = "Hosts under corp.example are the organization's own: what they return is internal. Require hitl attention before commands that publish releases or change production infrastructure."
+hint = "Hosts under corp.example are the organization's own: what they return is internal. Require human-approval attention before commands that publish releases or change production infrastructure."
 ```
 
 A root Annotator replaces the battery's of the same name. Preserve `builtin`
@@ -126,12 +146,12 @@ these root rules require fresh human approval for every `kubectl` command:
 ```toml
 [[policy.tool]]
 name = "host/claude-code/Bash(command:kubectl)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:kubectl *)"
-requires = { attention = ["hitl"] }
+requires = { attention = ["human-approval"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.authority]]
@@ -139,7 +159,7 @@ name = "operator"
 hint = "Ask the person running this Claude Code session."
 
 [policy.authority.permits]
-attention = ["hitl"]
+attention = ["human-approval"]
 
 [externals.authorities.operator]
 builtin = "hitl"

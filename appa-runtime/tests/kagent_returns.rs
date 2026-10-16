@@ -108,7 +108,13 @@ fn wire(event: &str, fields: serde_json::Value) -> serde_json::Value {
 /// One wire event in, the answer out, with the status it travels under.
 async fn posted(runtime: &Runtime, event: serde_json::Value) -> (u16, serde_json::Value) {
     let body = serde_json::to_vec(&event).expect("the event serializes");
-    hooks::answer(runtime, &appa_adapter_kagent::adapter(), &body).await
+    hooks::answer(
+        runtime,
+        &appa_adapter_kagent::adapter(),
+        appa_runtime_api::PrincipalSource::None,
+        &body,
+    )
+    .await
 }
 
 /// One wire event in, the answer out. The status the answer travels under is
@@ -316,7 +322,12 @@ async fn a_marked_spawn_is_held_on_a_menu_that_carries_every_return_route() {
             "the menu offers every registered output sanitizer, {sanitizer} included: {held}"
         );
     }
-    assert_eq!(routes.len(), 3, "one offer per route, and no other: {held}");
+    assert_eq!(
+        routes.last(),
+        Some(&serde_json::json!("void")),
+        "the declaration that takes no return closes the menu: {held}"
+    );
+    assert_eq!(routes.len(), 4, "one offer per route, and no other: {held}");
 
     let ids: Vec<OfferId> = menu
         .iter()

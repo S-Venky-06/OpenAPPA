@@ -57,7 +57,7 @@ pub struct Bundle {
 )]
 pub struct Install {
     /// Host plugin to install. Omitted, the catalog is listed instead.
-    #[arg(value_parser = ["claude-code", "kagent"])]
+    #[arg(value_parser = ["claude-code", "kagent", "opencode"])]
     name: Option<String>,
     /// Kagent agent runtimes to prepare; both on first install, otherwise retained.
     #[arg(long, value_enum)]
@@ -110,7 +110,7 @@ pub struct BatteryRemove {
 )]
 pub struct PluginRemove {
     /// Host plugin whose installer-owned registration is removed.
-    #[arg(value_parser = ["claude-code", "kagent"])]
+    #[arg(value_parser = ["claude-code", "kagent", "opencode"])]
     name: String,
     /// Also stop the runtime and delete the default deployment's data and config directories.
     #[arg(long)]
@@ -119,13 +119,16 @@ pub struct PluginRemove {
     target: Target,
 }
 
-pub fn remove_plugin(args: PluginRemove) -> ExitCode {
+pub fn remove_plugin(mut args: PluginRemove) -> ExitCode {
     begin(&args.target);
     if args.purge {
         return purge_plugin(args);
     }
     let result = (|| {
         let path = plugin_path(&args.target, &args.name)?;
+        if args.name == "opencode" {
+            args.target.config = Some(path.clone());
+        }
         match Installation::inspect(&path) {
             Ok(None) => {
                 return Ok((None, serde_json::json!({"plugin":args.name,"state":"unchanged"})));
@@ -283,7 +286,10 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         if !args.server.is_empty() {
             let battery = &batteries[0];
             if battery.namespaces.len() != 1 {
-                return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
+                return Err(InstallError::Invalid(
+                    "this battery has multiple namespaces; configure aliases.mcp explicitly in the deployment config"
+                        .into(),
+                ));
             }
             text = edit::bind_servers(&text, battery.namespaces[0].as_str(), &args.server)?;
         }
@@ -629,7 +635,7 @@ fn archive_digest(value: &str) -> Result<ArtifactDigest, String> {
     ArtifactDigest::parse(&format!("sha256:{value}")).map_err(|error| error.to_string())
 }
 
-pub fn install(args: Install) -> ExitCode {
+pub fn install(mut args: Install) -> ExitCode {
     let Some(name) = args.name.clone() else {
         return orient(PackageKind::Plugin, &args.target);
     };
@@ -645,6 +651,9 @@ pub fn install(args: Install) -> ExitCode {
             ));
         }
         let path = plugin_path(&args.target, &name)?;
+        if name == "opencode" {
+            args.target.config = Some(path.clone());
+        }
         if path.exists() {
             crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
         }
@@ -661,17 +670,18 @@ pub fn install(args: Install) -> ExitCode {
         let current = installation.selection()?;
         let platform = Platform::current()
             .ok_or_else(|| InstallError::Invalid("this platform has no published runtime binary".into()))?;
-        let claude = name == "claude-code"
-            || current
-                .as_ref()
-                .is_some_and(|selection| selection.plugins.contains("claude-code"));
+        let native = name == "claude-code"
+            || name == "opencode"
+            || current.as_ref().is_some_and(|selection| {
+                selection.plugins.contains("claude-code") || selection.plugins.contains("opencode")
+            });
         let kagent = name == "kagent"
             || current
                 .as_ref()
                 .is_some_and(|selection| selection.plugins.contains("kagent"));
-        let requirements = match (claude, kagent) {
+        let requirements = match (native, kagent) {
             (true, true) => Requirements::Both(platform),
-            (true, false) => Requirements::Claude(platform),
+            (true, false) => Requirements::Native(platform),
             (false, true) => Requirements::Kagent,
             (false, false) => unreachable!("parser requires a supported plugin"),
         };
@@ -819,7 +829,7 @@ fn coverage_result(
     servers: &std::collections::BTreeSet<Namespace>,
     available: &[(PackageName, Battery)],
     included: &std::collections::BTreeSet<String>,
-    bindings: &crate::config::ServerBindings,
+    bindings: &crate::config::aliases::NamespaceBindings,
     config: Option<&Path>,
     target: BatteryTarget,
 ) -> serde_json::Value {
@@ -916,6 +926,9 @@ pub(crate) fn is_published_build() -> bool {
 }
 
 fn plugin_path(target: &Target, plugin: &str) -> Result<PathBuf, InstallError> {
+    if plugin == "opencode" && target.config.is_none() {
+        return super::opencode::config_path();
+    }
     if plugin == "kagent" && target.config.is_none() {
         return Err(InstallError::Invalid(
             "kagent requires --config <deployment/appa.toml> (or APPA_CONFIG); no cluster is selected automatically"
@@ -1434,7 +1447,10 @@ fn finish(
             // The mark, then what to do next: the install is done being
             // reported, so this is the one moment it is not in the way.
             .and_then(|()| writeln!(output, "\n{}", crate::mascot::happy(style)))
-            .and_then(|()| writeln!(output, "{}\n", guide_next(style)))
+            .and_then(|()| match plugin {
+                "opencode" => writeln!(output, "Run `appa opencode setup --config {}` from the project to configure, then start a fresh OpenCode session.\n", shell_word(&receipt.deployment.display().to_string())),
+                _ => writeln!(output, "{}\n", guide_next(style)),
+            })
         }
     } else if let Some(batteries) = receipt.result.as_ref().and_then(|result| result.get("batteries")) {
         (|| {

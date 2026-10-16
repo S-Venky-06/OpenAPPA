@@ -260,6 +260,15 @@ enum Occasion<'a> {
     Other,
 }
 
+impl<'a> Occasion<'a> {
+    fn call_id(self) -> Option<&'a str> {
+        match self {
+            Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => call_id,
+            Occasion::Remedy { .. } | Occasion::Other => None,
+        }
+    }
+}
+
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
 }
@@ -1597,11 +1606,24 @@ impl Session {
         let started_at = std::time::SystemTime::now();
         let started = std::time::Instant::now();
         let externals = &self.deployment.externals;
-        let (outcome, transcript) = match &self.inner.recorder {
-            // Boxed: the transport future is large, and every drive awaits it deep in the stack.
-            Some(_) => Box::pin(externals.consult_transcribed(consult, elicitation, ruling)).await,
-            None => (Box::pin(externals.consult(consult, elicitation, ruling)).await, None),
+        let consulting = async {
+            match &self.inner.recorder {
+                // Boxed: the transport future is large, and every drive awaits it deep in the stack.
+                Some(_) => Box::pin(externals.consult_transcribed(consult, elicitation, ruling)).await,
+                None => (Box::pin(externals.consult(consult, elicitation, ruling)).await, None),
+            }
         };
+        #[cfg(feature = "archestra")]
+        let (outcome, transcript) = {
+            let attribution = crate::model::archestra::Attribution {
+                root: self.root.clone(),
+                trajectory: self.trajectory.clone(),
+                call_id: occasion.call_id().map(str::to_owned),
+            };
+            crate::model::archestra::within(self.inner.archestra_context.as_deref(), attribution, consulting).await
+        };
+        #[cfg(not(feature = "archestra"))]
+        let (outcome, transcript) = consulting.await;
         // A transport that read on for the record alone says when the outcome was known.
         let settled = transcript
             .as_ref()
@@ -1627,12 +1649,7 @@ impl Session {
                 let context = ConsultContext {
                     root: self.root.0.clone(),
                     trajectory: self.trajectory.0.clone(),
-                    call_id: match occasion {
-                        Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => {
-                            call_id.map(str::to_string)
-                        }
-                        Occasion::Remedy { .. } | Occasion::Other => None,
-                    },
+                    call_id: occasion.call_id().map(str::to_string),
                     offer_id: match occasion {
                         Occasion::Remedy { offer } => Some(offer.0.clone()),
                         Occasion::Proposal { .. } | Occasion::Report { .. } | Occasion::Other => None,
@@ -2197,15 +2214,21 @@ context_control = true
         sanitizer: Option<&str>,
         label: crate::engine::LabelSpelling,
     ) -> ExactCall {
-        authorize_spawn_as(session, spawn, SpawnKind::Single, sanitizer, label).await
+        let route = match sanitizer {
+            None => appa_runtime_api::OfferedReturn::AsSpoken,
+            Some(sanitizer) => appa_runtime_api::OfferedReturn::Sanitized {
+                sanitizer: sanitizer.to_string(),
+            },
+        };
+        authorize_spawn_as(session, spawn, SpawnKind::Single, route, Some(label)).await
     }
 
     async fn authorize_spawn_as(
         session: &Session,
         spawn: ProposedCall,
         kind: SpawnKind,
-        sanitizer: Option<&str>,
-        label: crate::engine::LabelSpelling,
+        route: appa_runtime_api::OfferedReturn,
+        label: Option<crate::engine::LabelSpelling>,
     ) -> ExactCall {
         let ToolCallDecision::Deny { offers, .. } = session
             .on_tool_call_identified(spawn, None, Some(kind), None)
@@ -2216,12 +2239,7 @@ context_control = true
         };
         let quoted = offers
             .iter()
-            .find(|offer| {
-                offer.returns.as_ref().map(|route| match route {
-                    appa_runtime_api::OfferedReturn::AsSpoken => None,
-                    appa_runtime_api::OfferedReturn::Sanitized { sanitizer } => Some(sanitizer.as_str()),
-                }) == Some(sanitizer)
-            })
+            .find(|offer| offer.returns.as_ref() == Some(&route))
             .map(|offer| OfferId(offer.id.clone()))
             .expect("the menu offers the requested return route");
         let log = session.inner.log(&session.root).expect("the log reads");
@@ -2230,7 +2248,7 @@ context_control = true
             .on_remedy(
                 offer,
                 RemedyArguments {
-                    label: Some(label),
+                    label,
                     return_schema: None,
                 },
                 None,
@@ -3443,6 +3461,61 @@ context_control = false
             runtime.live(&root(), &TrajectoryId("cc:child".to_string())).is_ok(),
             "a return leaves the child live"
         );
+    }
+
+    /// The parent declared it takes no return: the child narrows freely, its text stop is
+    /// blocked, and its empty stop leaves the parent's label and sinks as they were.
+    #[tokio::test]
+    async fn a_void_child_narrows_freely_and_leaves_the_parent_unchanged() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        let spawn = fetch(serde_json::json!({"a": 9}));
+        let call = authorize_spawn_as(
+            &session,
+            spawn.clone(),
+            SpawnKind::Single,
+            appa_runtime_api::OfferedReturn::Void,
+            None,
+        )
+        .await;
+        let ToolCallDecision::Allow {
+            spawn: Some(binding), ..
+        } = session
+            .on_tool_call(call.proposed(), true)
+            .await
+            .expect("the approved spawn releases")
+        else {
+            panic!("the approved spawn releases with its fork");
+        };
+        let mut child = session
+            .on_child_start(TrajectoryId("cc:child".to_string()), SpawnRef::Binding(binding))
+            .expect("the fork binds and the child opens");
+        // Under the bare floor at the parent's label no plan would accept this drop.
+        admit_success(&runtime, &mut child, taint(serde_json::json!({"a": 1}))).await;
+
+        assert!(matches!(
+            child
+                .on_child_end(Some("summary of untrusted data".to_string()))
+                .await
+                .expect("the stop is judged"),
+            crate::api::ChildReturnDecision::Blocked { .. }
+        ));
+        assert_eq!(
+            child.on_child_end(None).await.expect("the empty stop ends the child"),
+            crate::api::ChildReturnDecision::NoValue
+        );
+        session
+            .on_tool_result(
+                spawn,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+            )
+            .await
+            .expect("the spawn dispatch closes");
+        assert_eq!(runtime.status(&root()).expect("the root answers").trust, "trusted");
     }
 
     /// The parent declared it takes a suspicious return; the child's tainted return
@@ -5899,8 +5972,8 @@ delta = {}
             session,
             spawn,
             SpawnKind::FanOut,
-            None,
-            crate::engine::LabelSpelling::default(),
+            appa_runtime_api::OfferedReturn::AsSpoken,
+            Some(crate::engine::LabelSpelling::default()),
         )
         .await;
         session
@@ -6044,8 +6117,8 @@ delta = {}
             &session,
             fetch(serde_json::json!({"a": 1})),
             SpawnKind::FanOut,
-            None,
-            crate::engine::LabelSpelling::default(),
+            appa_runtime_api::OfferedReturn::AsSpoken,
+            Some(crate::engine::LabelSpelling::default()),
         )
         .await;
         let refused = session

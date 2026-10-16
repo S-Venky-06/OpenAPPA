@@ -16,7 +16,7 @@ use crate::fact::{
 use crate::label::{Expansions, Label, MembershipContext};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
-use crate::profile::PolicyIdentityV2;
+use crate::profile::PolicyIdentity;
 use crate::projection::{Projection, Views};
 use crate::value::{
     ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
@@ -525,6 +525,9 @@ pub enum TransitionError {
     /// it, so the child keeps it. Returning nothing is always open to the child.
     #[error("the return stands below the floor the parent set for this child")]
     ReturnBelowFloor { floor: Label },
+    /// The parent declared that this child returns nothing: only an empty stop ends it.
+    #[error("the parent declared that this child returns nothing")]
+    ReturnVoid,
     #[error(transparent)]
     ReturnPolicy(#[from] crate::plan::ReturnPolicyRefusal),
 }
@@ -557,7 +560,7 @@ pub struct EngineDecision {
 pub struct ValidatedFactBatch {
     facts: Vec<Fact>,
     basis: u64,
-    policy: PolicyIdentityV2,
+    policy: PolicyIdentity,
     family: TrajectoryId,
 }
 
@@ -567,7 +570,7 @@ impl ValidatedFactBatch {
     pub(crate) fn seal(
         facts: Vec<Fact>,
         basis: u64,
-        policy: PolicyIdentityV2,
+        policy: PolicyIdentity,
         family: TrajectoryId,
     ) -> ValidatedFactBatch {
         ValidatedFactBatch {
@@ -584,7 +587,7 @@ impl ValidatedFactBatch {
         self.basis
     }
 
-    pub(crate) fn policy(&self) -> PolicyIdentityV2 {
+    pub(crate) fn policy(&self) -> PolicyIdentity {
         self.policy
     }
 
@@ -634,14 +637,14 @@ pub enum BatchRefusal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineView {
     projection: Projection,
-    policy: PolicyIdentityV2,
+    policy: PolicyIdentity,
     family: TrajectoryId,
 }
 
 impl EngineView {
     /// Take the projection a [`Sequence`] validated. Crate-private: the public entry is
     /// `Engine::view`, which runs that validation.
-    pub(crate) fn validated(projection: Projection, policy: PolicyIdentityV2, family: TrajectoryId) -> EngineView {
+    pub(crate) fn validated(projection: Projection, policy: PolicyIdentity, family: TrajectoryId) -> EngineView {
         EngineView {
             projection,
             policy,
@@ -679,7 +682,7 @@ impl EngineView {
         self.projection.offer_trajectory(offer)
     }
 
-    pub(crate) fn policy(&self) -> PolicyIdentityV2 {
+    pub(crate) fn policy(&self) -> PolicyIdentity {
         self.policy
     }
 
@@ -842,6 +845,8 @@ pub enum TransitionRefusal {
     ReturnShapeViolation,
     #[error("a return record stands below the floor the parent set for its child")]
     ReturnBelowFloor,
+    #[error("a return record crosses a fork whose parent declared no return")]
+    ReturnVoid,
     #[error("a return or fork record names a branch that has already ended")]
     BranchEnded,
     #[error("a return record names a trajectory that was never forked")]
@@ -2190,11 +2195,12 @@ impl<'a> Sequence<'a> {
     }
 
     /// The strict judgment of the durable opening: the family's first record, naming
-    /// the family, at a dialect this engine reads, carrying this policy's digest, its validated
-    /// declaration byte for byte — which subsumes re-running the coverage matrix over it — and
-    /// the open vectors that declaration derives. `policy_file_key` is deliberately not judged
-    /// here: it names a stored file this engine never sees, and the outer layer re-hashes the
-    /// file it loaded against the record on every event.
+    /// the family, at a dialect this engine reads, carrying a digest that names this policy
+    /// ([`crate::engine::Engine::recognizes`]), its validated declaration byte for byte — which
+    /// subsumes re-running the coverage matrix over it — and the open vectors that declaration
+    /// derives. `policy_file_key` is deliberately not judged here: it names a stored file this
+    /// engine never sees, and the outer layer re-hashes the file it loaded against the record on
+    /// every event.
     fn root_opened(&self, opening: &TrajectoryOpening) -> Result<(), OpeningTransitionRefusal> {
         if self.projection.is_opened(&self.family) {
             return Err(OpeningTransitionRefusal::Duplicate);
@@ -2209,7 +2215,7 @@ impl<'a> Sequence<'a> {
                 found: opening.dialect.value(),
             });
         }
-        if opening.policy_digest != self.engine.identity() {
+        if !self.engine.recognizes(&opening.policy_digest) {
             return Err(OpeningTransitionRefusal::DigestMismatch);
         }
         if opening.profile != *self.engine.registry().profile() {
@@ -2701,10 +2707,13 @@ impl<'a> Sequence<'a> {
         if id.child() != child || id.occurrence() != views.returns_by(child) {
             return Err(TransitionRefusal::WrongReturnIdentity);
         }
-        let policy = views
+        let ReturnPolicy::Crossing(policy) = views
             .return_policy_of(child)
             .ok_or(TransitionRefusal::NotForked)?
-            .clone();
+            .clone()
+        else {
+            return Err(TransitionRefusal::ReturnVoid);
+        };
         let fold = views.branch_label(child);
         let expected = match (&policy.sanitizer, derivation) {
             (None, ReturnDerivation::Raw) => fold.clone(),
@@ -3066,7 +3075,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::WrongReturnIdentity);
         }
         let policy = views.return_policy_of(child).ok_or(TransitionRefusal::NotForked)?;
-        match &policy.sanitizer {
+        match policy.crossing().and_then(|crossing| crossing.sanitizer.as_ref()) {
             Some(ReturnSanitizer::Named(bound)) if bound == sanitizer => {}
             _ => return Err(TransitionRefusal::SanitizerUnapplicable),
         }

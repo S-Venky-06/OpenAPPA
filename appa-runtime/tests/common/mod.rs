@@ -13,8 +13,8 @@ use appa_runtime::api::{OfferId, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, AdapterName, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
-    WireDecision, WireEvent,
+    Actor, AdapterName, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PrincipalSource, ProposedCall, ToolOutcome,
+    TrajectoryId, WireDecision, WireEvent,
 };
 
 /// The Claude Code hook JSON a suite is written in, as the served runtime
@@ -27,7 +27,7 @@ pub fn claude_event(hook_json: &serde_json::Value) -> Option<HookEvent> {
     let event = (appa_adapter_claude_code::codec().parse)(&body).expect("the Claude Code event parses")?;
     let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
     let accepted = wire
-        .into_event(&appa_adapter_claude_code::adapter())
+        .into_event(&appa_adapter_claude_code::adapter(), PrincipalSource::None)
         .expect("the wire event maps")
         .expect("a translated event is no ping");
     Some(accepted.event)
@@ -48,7 +48,13 @@ pub async fn claude_hook(runtime: &Runtime, hook_json: &serde_json::Value) -> (u
     };
     let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
     let wire = serde_json::to_vec(&wire).expect("the wire event serializes");
-    let (status, answer) = hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &wire).await;
+    let (status, answer) = hooks::answer(
+        runtime,
+        &appa_adapter_claude_code::adapter(),
+        PrincipalSource::None,
+        &wire,
+    )
+    .await;
     match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
         Ok(Ok(decision)) => (status, (codec.render)(&body, &event, &decision)),
         _ => (status, answer),
@@ -198,6 +204,42 @@ pub fn repo_root() -> PathBuf {
         .parent()
         .expect("the runtime crate sits one level below the repo root")
         .to_path_buf()
+}
+
+/// `root` including the shipped battery's rules for the harness's session tools
+/// only: these suites replace the model-backed Bash and Read rules and the
+/// Bash masker with deterministic ones of their own.
+pub fn including_session_tool_rules(dir: &Path, root: &str) -> String {
+    let shipped = std::fs::read_to_string(repo_root().join("marketplace/batteries/claude-code/appa.toml"))
+        .expect("the shipped battery is readable");
+    let shipped: toml::Value = toml::from_str(&shipped).expect("the shipped battery parses");
+    let selected = ["Bash", "Monitor", "PowerShell", "Read", "Grep", "Write", "Edit"];
+    let tools: Vec<toml::Value> = shipped["policy"]["tool"]
+        .as_array()
+        .expect("the battery declares tools")
+        .iter()
+        .filter(|rule| {
+            let name = rule["name"].as_str().expect("every rule is named");
+            let tool = name.split('(').next().expect("split yields a first part");
+            !selected.iter().any(|seven| tool == format!("host/claude-code/{seven}"))
+        })
+        .cloned()
+        .collect();
+    let mut policy = toml::Table::new();
+    policy.insert("version".into(), shipped["policy"]["version"].clone());
+    policy.insert("tool".into(), toml::Value::Array(tools));
+    let battery = dir.join("batteries/claude-code");
+    std::fs::create_dir_all(&battery).expect("the battery directory is created");
+    std::fs::write(
+        battery.join("appa.toml"),
+        toml::to_string(&toml::Table::from_iter([(
+            "policy".to_string(),
+            toml::Value::Table(policy),
+        )]))
+        .unwrap(),
+    )
+    .expect("the battery writes");
+    format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{root}")
 }
 
 /// Every offer a feedback body names, in the order the feedback lists
